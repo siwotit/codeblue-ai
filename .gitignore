@@ -1,2 +1,29 @@
 # Kiro spec files
 .kiro/
+
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# uv lockfile (optional, can be committed)
+# uv.lock

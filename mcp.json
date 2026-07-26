@@ -1,0 +1,171 @@
+{
+  "mcpServers": {
+    "cloudwatch-mcp": {
+      "command": "npx",
+      "args": ["-y", "@aws/cloudwatch-mcp-server"],
+      "env": {
+        "AWS_REGION": "${AWS_REGION:-us-east-1}",
+        "AWS_PROFILE": "${AWS_PROFILE:-default}"
+      },
+      "allowedTools": [
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:DescribeAlarmsForMetric",
+        "logs:StartQuery",
+        "logs:GetQueryResults",
+        "logs:DescribeLogGroups",
+        "logs:FilterLogEvents"
+      ],
+      "permissions": {
+        "iamRole": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/CodeBlueAI-CloudWatchReadOnly",
+        "policy": "CloudWatchReadOnlyAccess, CloudWatchLogsReadOnlyAccess",
+        "notes": "Read-only access to CloudWatch alarms, metrics, and log insights queries"
+      }
+    },
+    "grafana-mcp": {
+      "command": "npx",
+      "args": ["-y", "@grafana/mcp-server"],
+      "env": {
+        "GRAFANA_URL": "${GRAFANA_URL}",
+        "GRAFANA_API_KEY": "${GRAFANA_API_KEY}"
+      },
+      "allowedTools": [
+        "grafana:SearchDashboards",
+        "grafana:GetDashboard",
+        "grafana:ListAlertRules",
+        "grafana:GetAlertRule",
+        "grafana:GetAlertInstances",
+        "grafana:QueryDatasource"
+      ],
+      "permissions": {
+        "iamRole": null,
+        "policy": "Grafana Viewer role",
+        "notes": "Read-only access to Grafana dashboards and alert rules. Requires Viewer-level API key."
+      }
+    },
+    "kubernetes-mcp": {
+      "command": "npx",
+      "args": ["-y", "@kubernetes/mcp-server"],
+      "env": {
+        "KUBECONFIG": "${KUBECONFIG:-~/.kube/config}",
+        "K8S_CONTEXT": "${K8S_CONTEXT}"
+      },
+      "allowedTools": [
+        "k8s:GetPod",
+        "k8s:ListPods",
+        "k8s:GetNode",
+        "k8s:ListNodes",
+        "k8s:GetDeployment",
+        "k8s:ListDeployments",
+        "k8s:ListEvents",
+        "k8s:GetNamespace",
+        "k8s:ListNamespaces",
+        "k8s:GetReplicaSet",
+        "k8s:ListReplicaSets",
+        "k8s:GetDaemonSet",
+        "k8s:ListDaemonSets",
+        "k8s:GetStatefulSet",
+        "k8s:GetHPA",
+        "k8s:ListHPA",
+        "k8s:GetPodLogs"
+      ],
+      "permissions": {
+        "iamRole": null,
+        "policy": "ClusterRole: view (built-in read-only)",
+        "notes": "Read-only access to Kubernetes resources. Uses the 'view' ClusterRole which grants get/list/watch on all non-secret resources. No create/update/delete/patch permissions."
+      }
+    },
+    "aws-api-mcp": {
+      "command": "npx",
+      "args": ["-y", "@aws/api-mcp-server"],
+      "env": {
+        "AWS_REGION": "${AWS_REGION:-us-east-1}",
+        "AWS_PROFILE": "${AWS_PROFILE:-default}"
+      },
+      "allowedTools": [
+        "cloudtrail:LookupEvents",
+        "cloudtrail:GetTrailStatus",
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "eks:DescribeNodegroup",
+        "eks:ListNodegroups",
+        "eks:DescribeAddon",
+        "eks:ListAddons",
+        "eks:DescribeAddonVersions",
+        "ecs:DescribeServices",
+        "ecs:DescribeTasks",
+        "ecs:ListServices",
+        "ecs:ListTasks",
+        "ec2:DescribeInstances",
+        "lambda:GetFunction",
+        "lambda:ListFunctions"
+      ],
+      "permissions": {
+        "iamRole": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/CodeBlueAI-AWSReadOnly",
+        "policy": "CloudTrailReadOnlyAccess, AmazonEKSViewPolicy, AmazonEC2ReadOnlyAccess",
+        "notes": "Read-only access to CloudTrail events, EKS cluster descriptions, and general AWS resource state. No write/mutate operations permitted."
+      }
+    },
+    "slack-mcp": {
+      "command": "npx",
+      "args": ["-y", "@slack/mcp-server"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "SLACK_INCIDENT_CHANNEL": "${SLACK_INCIDENT_CHANNEL}"
+      },
+      "allowedTools": [
+        "slack:PostMessage",
+        "slack:UpdateMessage",
+        "slack:AddReaction"
+      ],
+      "permissions": {
+        "iamRole": null,
+        "policy": "Slack Bot OAuth Scopes: chat:write, reactions:write",
+        "notes": "This is the ONLY MCP with write permissions. Restricted to posting/updating messages in the pre-configured incident channel. No read access to channel history or user data."
+      }
+    }
+  },
+  "_documentation": {
+    "description": "CodeBlue AI MCP Server Configuration",
+    "readOnlyPolicy": "All MCPs except slack-mcp are strictly read-only. The orchestrator enforces that no write/create/update/delete operations are invoked against monitored systems.",
+    "requiredIAMRoles": [
+      {
+        "role": "CodeBlueAI-CloudWatchReadOnly",
+        "services": ["cloudwatch", "logs"],
+        "managedPolicies": ["CloudWatchReadOnlyAccess", "CloudWatchLogsReadOnlyAccess"]
+      },
+      {
+        "role": "CodeBlueAI-AWSReadOnly",
+        "services": ["cloudtrail", "eks", "ecs", "ec2", "lambda"],
+        "managedPolicies": ["CloudTrailReadOnlyAccess", "AmazonEKSViewPolicy"]
+      }
+    ],
+    "requiredExternalCredentials": [
+      {
+        "name": "GRAFANA_API_KEY",
+        "type": "API Key",
+        "permission": "Viewer role",
+        "source": "Grafana Admin UI > Service Accounts"
+      },
+      {
+        "name": "SLACK_BOT_TOKEN",
+        "type": "OAuth Bot Token",
+        "permission": "chat:write, reactions:write",
+        "source": "Slack App Management > OAuth & Permissions"
+      }
+    ],
+    "environmentVariables": {
+      "AWS_REGION": "Target AWS region (default: us-east-1)",
+      "AWS_PROFILE": "AWS CLI profile to use (default: default)",
+      "AWS_ACCOUNT_ID": "AWS account ID for IAM role ARNs",
+      "GRAFANA_URL": "Grafana instance base URL",
+      "GRAFANA_API_KEY": "Grafana API key with Viewer permissions",
+      "KUBECONFIG": "Path to kubeconfig file (default: ~/.kube/config)",
+      "K8S_CONTEXT": "Kubernetes context to use",
+      "SLACK_BOT_TOKEN": "Slack bot OAuth token",
+      "SLACK_INCIDENT_CHANNEL": "Slack channel ID for incident reports"
+    }
+  }
+}
