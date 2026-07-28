@@ -44,8 +44,8 @@ from skills.shared.models import (
 # Generate fired_at timestamps from a range of past times (up to 30 days ago)
 # to present. This ensures variety in temporal distances.
 fired_at_strategy = st.datetimes(
-    min_value=datetime(2020, 1, 1, tzinfo=timezone.utc),
-    max_value=datetime(2025, 6, 1, tzinfo=timezone.utc),
+    min_value=datetime(2020, 1, 1),
+    max_value=datetime(2025, 6, 1),
     timezones=st.just(timezone.utc),
 )
 

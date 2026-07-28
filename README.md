@@ -9,7 +9,7 @@ An AI-powered incident first responder agent that runs inside Claude Code. It mo
 CodeBlue AI acts as your always-on first responder. When an incident is developing — or has already fired — it:
 
 1. **Detects** — Reads CloudWatch Alarms, Grafana alert rules, and Kubernetes cluster state to catch issues as they emerge
-2. **Correlates** — Pulls recent deployments, CloudTrail events, Kubernetes events, and metric baselines to find what changed
+2. **Correlates** — Pulls metrics, logs, cluster state, and recent rollouts to find what changed
 3. **Diagnoses** — Produces a first-pass root cause hypothesis with supporting evidence
 4. **Reports** — Posts a structured incident summary to Slack with severity, blast radius, and recommended next steps
 
@@ -29,14 +29,24 @@ All read-only. It never restarts services, rolls back deployments, or modifies i
 │  └─────┬─────┘ └─────┬─────┘ └──────┬─────┘ └────────┬──────────┘   │
 │        │              │              │                 │              │
 │  ┌─────┴──────────────┴──────────────┴─────────────────┴──────────┐   │
-│  │                    CodeBlue AI Skills                           │   │
+│  │                    CodeBlue AI                                   │   │
 │  │                                                                 │   │
-│  │  • alert-ingestion       • metric-baseline                      │   │
-│  │  • deploy-correlation    • log-triage                           │   │
-│  │  • hypothesis-engine     • incident-summary-format              │   │
-│  │  • escalation-decision   • evidence-provenance                  │   │
-│  │  • k8s-cluster-health    • pod-failure-triage                   │   │
-│  │  • node-condition-check  • eks-addon-status                     │   │
+│  │  Shared:                                                        │   │
+│  │    • cloudwatch (metrics, logs, baseline comparison)            │   │
+│  │    • models, config, mcp_client                                 │   │
+│  │                                                                 │   │
+│  │  Skills:                                                        │   │
+│  │    • alert-ingestion        (entry point)                       │   │
+│  │    • eks-triage             (service skill)                     │   │
+│  │    • ec2-triage             (service skill)                     │   │
+│  │    • ecs-triage             (service skill)                     │   │
+│  │    • hypothesis-engine      (reasoning)                         │   │
+│  │    • escalation-decision    (reasoning)                         │   │
+│  │    • incident-summary       (output + provenance)               │   │
+│  │                                                                 │   │
+│  │  Future Service Skills:                                         │   │
+│  │    • rds-triage                                                 │   │
+│  │    • lambda-triage                                              │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -53,7 +63,6 @@ All read-only. It never restarts services, rolls back deployments, or modifies i
 | Metrics & Dashboards | Grafana + CloudWatch |
 | Alarms | CloudWatch Alarms |
 | Notifications | Slack |
-| Deployment Tracking | CloudTrail + Kubernetes Events + (GitHub/CI optional) |
 
 ---
 
@@ -65,26 +74,30 @@ All read-only. It never restarts services, rolls back deployments, or modifies i
 | `grafana-mcp` | Read dashboards, alert rules, and metric panels |
 | `kubernetes-mcp` | Read pod/node/event state, describe resources, check EKS cluster health (read-only) |
 | `slack-mcp` | Post incident summaries and triage updates |
-| `aws-api-mcp` | CloudTrail events, EKS API, resource state, recent changes |
+| `aws-api-mcp` | CloudTrail events, EKS API, resource state |
 
 ---
 
-## Skills (Knowledge Layer)
+## Skills
 
-| Skill | What It Does |
-|-------|--------------|
-| `alert-ingestion` | Normalize alerts from CloudWatch and Grafana into a common format |
-| `metric-baseline-comparison` | Compare current metric values against 7-day/30-day baselines to quantify deviation |
-| `deploy-correlation` | Check CloudTrail, Kubernetes rollouts, and deployment pipelines for changes in the last 24h that overlap with affected resources |
-| `log-triage` | Query CloudWatch Logs Insights and pod logs for error patterns, exceptions, and timeout spikes |
-| `hypothesis-engine` | Given correlated signals, produce a ranked list of probable root causes |
-| `incident-summary-format` | Structure the output as a Slack message: severity, blast radius, hypothesis, evidence, and next steps |
-| `escalation-decision` | Determine whether this needs immediate human intervention or can wait for business hours |
-| `evidence-provenance` | Every claim in the summary links back to its source (metric, log line, CloudTrail event, kubectl output) |
-| `k8s-cluster-health` | Check node conditions, pending pods, resource pressure, and cluster-level events |
-| `pod-failure-triage` | Classify pod failures — CrashLoopBackOff, OOMKilled, ImagePullBackOff, sandbox creation errors — and surface the root cause |
-| `node-condition-check` | Detect NotReady nodes, memory/disk pressure, PID pressure, and network unavailability |
-| `eks-addon-status` | Check EKS addon health (VPC CNI, CoreDNS, kube-proxy, EBS CSI) for degraded or failed states |
+| Skill | Type | What It Does |
+|-------|------|--------------|
+| `alert-ingestion` | Entry point | Normalize alerts from CloudWatch, Grafana, and Kubernetes into a common format |
+| `eks-triage` | Service skill | Full EKS/K8s diagnosis — cluster health, pod failures, node conditions, addon status, recent rollouts |
+| `ec2-triage` | Service skill | EC2 instance diagnosis — status checks, health metrics, networking, recent changes, ASG context |
+| `ecs-triage` | Service skill | ECS service/task diagnosis — service stability, task failures, circuit breaker, LB health, recent deployments |
+| `hypothesis-engine` | Reasoning | Rank root causes by confidence from all collected signals |
+| `escalation-decision` | Reasoning | Determine urgency: page_now / notify_channel / business_hours |
+| `incident-summary` | Output | Format Slack Block Kit report with evidence provenance baked in |
+
+### Shared Modules (not skills — imported by skills)
+
+| Module | Provides |
+|--------|----------|
+| `shared/cloudwatch.py` | Metric queries, log queries, baseline comparison ("is this anomalous?") |
+| `shared/models.py` | Pydantic data models (NormalizedAlert, MetricDeviation, etc.) |
+| `shared/config.py` | Configuration and constants |
+| `shared/mcp_client.py` | MCP tool call abstraction layer |
 
 ---
 
@@ -94,41 +107,34 @@ All read-only. It never restarts services, rolls back deployments, or modifies i
 Alert fires (CloudWatch Alarm → ALARM state / Grafana alert / K8s event)
         │
         ▼
-CodeBlue AI picks up the alarm
+alert-ingestion (normalize to common format)
         │
         ▼
-Pull 1h of metrics for the affected resource (CloudWatch + Grafana)
+Signal collection (concurrent):
+  ├── shared/cloudwatch: metric baseline comparison (is this anomalous?)
+  ├── shared/cloudwatch: log triage (error patterns, exception spikes)
+  ├── eks-triage: cluster health + pod failures + node conditions + addons + recent rollouts
+  ├── ec2-triage: status checks + metrics + networking + recent instance changes
+  └── ecs-triage: service stability + task failures + circuit breaker + LB health + deployments
         │
         ▼
-Compare against 7-day baseline — is this anomalous or normal variance?
+hypothesis-engine (correlate all signals → ranked root causes)
         │
         ▼
-If EKS: check cluster health — node conditions, pending pods, failing addons, recent events
+escalation-decision (severity + blast radius + time-of-day → urgency)
         │
         ▼
-Query CloudTrail: any deployments, config changes, or IAM changes in the last 24h?
-        │
-        ▼
-If K8s workload: check recent rollouts, replica changes, HPA activity, OOM events
-        │
-        ▼
-Query CloudWatch Logs + pod logs: error rate spikes, new exception patterns?
-        │
-        ▼
-Correlate: does the timeline of the metric change align with a deploy or config change?
-        │
-        ▼
-Generate hypothesis with confidence level and supporting evidence
+incident-summary (format + provenance → Slack Block Kit message)
         │
         ▼
 Post to Slack:
   🔴 INCIDENT — [Service] [Cluster] [Namespace] [Region]
   Severity: High
-  Blast Radius: 12 pods in CrashLoopBackOff across 3 nodes in us-east-1
-  Hypothesis: EBS CSI driver addon degraded after v1.37.0 upgrade at 14:32 UTC —
-              pods cannot mount PVCs (evidence: 47 FailedAttachVolume events since 14:35)
-  Evidence: [links to metrics, pod events, addon status, CloudTrail]
-  Recommended: Roll back EBS CSI addon to v1.36.0 or cordon affected nodes
+  Blast Radius: 12 pods in CrashLoopBackOff across 3 nodes
+  Hypothesis: EBS CSI driver addon degraded after v1.37.0 upgrade —
+              pods cannot mount PVCs (evidence: 47 FailedAttachVolume events)
+  Evidence: [links to metrics, pod events, addon status]
+  Recommended: Roll back EBS CSI addon to v1.36.0
   Escalate: Yes — page on-call SRE
 ```
 
@@ -136,22 +142,24 @@ Post to Slack:
 
 ## What Makes This Different
 
-- **Proactive, not reactive** — It reads alarm states continuously and can flag degradation before a full outage
+- **Proactive, not reactive** — Reads alarm states continuously and flags degradation before a full outage
 - **Evidence-based** — Every hypothesis cites its source. No hallucinated root causes
-- **Read-only** — It will never touch your infrastructure. Diagnosis only
-- **Composable** — Skills are modular. Swap `deploy-correlation` for your CI tool, or add `terraform-drift-detection` later
-- **Runs where you already work** — Claude Code on your terminal. No new SaaS platform to adopt
+- **Read-only** — Will never touch your infrastructure. Diagnosis only
+- **Domain-organized** — Skills grouped by service (EKS, EC2, ECS) with CloudWatch as a shared utility
+- **Composable** — Add `ec2-triage` or `ecs-triage` following the same pattern
+- **Runs where you already work** — Claude Code on your terminal. No new SaaS platform
 
 ---
 
 ## Roadmap
 
-- [ ] v0.1 — CloudWatch Alarm reader + metric baseline comparison + Slack output
-- [ ] v0.2 — Grafana integration (dashboards + alert rules)
-- [ ] v0.3 — EKS cluster health checks (node conditions, pod status, addon health)
-- [ ] v0.4 — CloudTrail deploy correlation + K8s rollout detection
-- [ ] v0.5 — Log triage (CloudWatch Logs Insights + pod logs)
-- [ ] v0.6 — Hypothesis engine (multi-signal correlation)
+- [x] v0.1 — CloudWatch Alarm reader + metric baseline comparison + Slack output
+- [x] v0.2 — EKS cluster health checks (node conditions, pod status, addon health)
+- [ ] v0.3 — Grafana integration (dashboards + alert rules)
+- [ ] v0.4 — Log triage (CloudWatch Logs Insights + pod logs)
+- [ ] v0.5 — Hypothesis engine (multi-signal correlation)
+- [ ] v0.6 — EC2 triage skill
+- [ ] v0.7 — ECS triage skill
 - [ ] v1.0 — Full loop: detect → correlate → diagnose → report
 
 ---
@@ -159,7 +167,7 @@ Post to Slack:
 ## Future Extensions
 
 - Karpenter/Cluster Autoscaler scaling event correlation
-- Network Policy conflict detection (from your CNP case experience)
+- Network Policy conflict detection
 - VPC CNI IP exhaustion prediction
 - PagerDuty/Opsgenie integration for bi-directional incident management
 - GitHub MCP for commit-level deploy correlation

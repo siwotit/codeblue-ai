@@ -34,17 +34,12 @@ DEFAULT_SKILLS_DIR = "skills"
 # Each skill lives in skills/<skill-name>/<script_name>.py
 SKILL_SCRIPT_MAP: dict[str, str] = {
     "alert-ingestion": "alert-ingestion/alert_ingestion.py",
-    "metric-baseline": "metric-baseline/metric_baseline.py",
-    "deploy-correlation": "deploy-correlation/deploy_correlation.py",
-    "log-triage": "log-triage/log_triage.py",
+    "eks-triage": "eks-triage/eks_triage.py",
+    "ec2-triage": "ec2-triage/ec2_triage.py",
+    "ecs-triage": "ecs-triage/ecs_triage.py",
     "hypothesis-engine": "hypothesis-engine/hypothesis_engine.py",
     "escalation-decision": "escalation-decision/escalation_decision.py",
-    "incident-summary-format": "incident-summary-format/incident_summary.py",
-    "evidence-provenance": "evidence-provenance/evidence_provenance.py",
-    "k8s-cluster-health": "k8s-cluster-health/k8s_cluster_health.py",
-    "pod-failure-triage": "pod-failure-triage/pod_failure_triage.py",
-    "node-condition-check": "node-condition-check/node_condition_check.py",
-    "eks-addon-status": "eks-addon-status/eks_addon_status.py",
+    "incident-summary": "incident-summary-format/incident_summary.py",
 }
 
 

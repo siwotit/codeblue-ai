@@ -195,7 +195,7 @@ class WorkflowContext:
         Requirement 11.4: Detect when all MCPs fail so that we produce
         a report with only original alert info at 0.1 confidence.
         """
-        core_sources = {"metric-baseline", "deploy-correlation", "log-triage"}
+        core_sources = {"metric-baseline", "log-triage", "eks-triage"}
         unavailable = set(self.signals.unavailable_sources)
         return core_sources.issubset(unavailable)
 
@@ -353,7 +353,7 @@ class WorkflowOrchestrator:
         alert_dict = alert.model_dump(by_alias=True, mode="json")
         skills: list[tuple[str, dict[str, Any]]] = []
 
-        # metric-baseline — always run
+        # metric-baseline — always run (via shared/cloudwatch module)
         skills.append((
             "metric-baseline",
             {
@@ -369,20 +369,7 @@ class WorkflowOrchestrator:
             },
         ))
 
-        # deploy-correlation — always run
-        skills.append((
-            "deploy-correlation",
-            {
-                "affectedResources": [
-                    r.model_dump(by_alias=True) for r in alert.affected_resources
-                ],
-                "incidentTime": alert.fired_at.isoformat(),
-                "lookbackWindow": "24h",
-                "alert": alert_dict,
-            },
-        ))
-
-        # log-triage — always run
+        # log-triage — always run (via shared/cloudwatch module)
         log_groups = self._infer_log_groups(alert)
         skills.append((
             "log-triage",
@@ -397,35 +384,14 @@ class WorkflowOrchestrator:
             },
         ))
 
-        # K8s health skills — only for EKS workloads (Req 3.7)
+        # eks-triage — only for EKS workloads (consolidated K8s skill)
         if self._should_run_k8s_skills(alert):
             skills.append((
-                "k8s-cluster-health",
+                "eks-triage",
                 {
-                    "clusterName": alert.cluster,
+                    "cluster": alert.cluster,
                     "region": alert.region,
-                    "alert": alert_dict,
-                },
-            ))
-            skills.append((
-                "pod-failure-triage",
-                {
-                    "namespace": alert.namespace or "default",
-                    "clusterName": alert.cluster,
-                    "alert": alert_dict,
-                },
-            ))
-            skills.append((
-                "node-condition-check",
-                {
-                    "clusterName": alert.cluster,
-                    "alert": alert_dict,
-                },
-            ))
-            skills.append((
-                "eks-addon-status",
-                {
-                    "clusterName": alert.cluster,
+                    "namespace": alert.namespace,
                     "alert": alert_dict,
                 },
             ))
@@ -523,13 +489,6 @@ class WorkflowOrchestrator:
                 logger.warning("Failed to parse metric-baseline output: %s", e)
                 ctx.signals.unavailable_sources.append("metric-baseline")
 
-        elif result.skill_name == "deploy-correlation":
-            try:
-                ctx.signals.correlated_changes = CorrelatedChanges(**data)
-            except Exception as e:
-                logger.warning("Failed to parse deploy-correlation output: %s", e)
-                ctx.signals.unavailable_sources.append("deploy-correlation")
-
         elif result.skill_name == "log-triage":
             try:
                 ctx.signals.log_findings = LogFindings(**data)
@@ -537,44 +496,15 @@ class WorkflowOrchestrator:
                 logger.warning("Failed to parse log-triage output: %s", e)
                 ctx.signals.unavailable_sources.append("log-triage")
 
-        elif result.skill_name in (
-            "k8s-cluster-health",
-            "pod-failure-triage",
-            "node-condition-check",
-            "eks-addon-status",
-        ):
-            # K8s skills contribute to the cluster health report
-            self._integrate_k8s_result(ctx, result)
-
-    def _integrate_k8s_result(
-        self, ctx: WorkflowContext, result: SkillResult
-    ) -> None:
-        """Integrate K8s skill results into the cluster health report.
-
-        Multiple K8s skills contribute to a single ClusterHealthReport.
-
-        Args:
-            ctx: The workflow context.
-            result: The skill result.
-        """
-        data = result.data or {}
-
-        if result.skill_name == "k8s-cluster-health":
+        elif result.skill_name == "eks-triage":
+            # EKS triage returns cluster health + pod failures + addon status
             try:
-                ctx.signals.cluster_health = ClusterHealthReport(**data)
+                cluster_health_data = data.get("clusterHealth")
+                if cluster_health_data:
+                    ctx.signals.cluster_health = ClusterHealthReport(**cluster_health_data)
             except Exception as e:
-                logger.warning(
-                    "Failed to parse k8s-cluster-health output: %s", e
-                )
-                ctx.signals.unavailable_sources.append("k8s-cluster-health")
-        # pod-failure-triage, node-condition-check, eks-addon-status
-        # enrich the existing cluster health report if present
-        elif ctx.signals.cluster_health is not None:
-            # These skills provide supplementary data; merge into report
-            logger.debug(
-                "Supplementary K8s data from %s integrated",
-                result.skill_name,
-            )
+                logger.warning("Failed to parse eks-triage output: %s", e)
+                ctx.signals.unavailable_sources.append("eks-triage")
 
     # ------------------------------------------------------------------
     # Hypothesis generation
@@ -628,7 +558,7 @@ class WorkflowOrchestrator:
     # ------------------------------------------------------------------
 
     async def _finalize_report(self, ctx: WorkflowContext) -> None:
-        """Run escalation-decision and evidence-provenance concurrently.
+        """Run escalation-decision concurrently with hypothesis.
 
         Args:
             ctx: The workflow context.
@@ -647,18 +577,6 @@ class WorkflowOrchestrator:
                         ei.model_dump(by_alias=True, mode="json")
                         for ei in ctx.signals.evidence_items
                     ],
-                    "alert": alert_dict,
-                },
-            ),
-            (
-                "evidence-provenance",
-                {
-                    "findings": [
-                        ei.model_dump(by_alias=True, mode="json")
-                        for ei in ctx.signals.evidence_items
-                    ],
-                    "region": ctx.alert.region,
-                    "clusterContext": ctx.alert.cluster,
                     "alert": alert_dict,
                 },
             ),

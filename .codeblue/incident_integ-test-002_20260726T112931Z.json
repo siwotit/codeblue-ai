@@ -1,0 +1,10 @@
+{
+  "incident_id": "integ-test-002",
+  "stored_at": "2026-07-26T11:29:31.162818+00:00",
+  "delivery_error": "Attempt 3: Slack API error (attempt 3)",
+  "channel": "#incidents",
+  "message": {
+    "text": "Test incident report",
+    "blocks": []
+  }
+}

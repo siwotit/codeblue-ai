@@ -133,7 +133,7 @@ async def format_incident_report(
     report_data = report.model_dump(by_alias=True, mode="json")
 
     result = await skill_invoker.invoke(
-        skill_name="incident-summary-format",
+        skill_name="incident-summary",
         input_data=report_data,
         timeout=10.0,
     )
