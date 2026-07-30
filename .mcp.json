@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "awslabs.cloudwatch-mcp-server": {
+      "autoApprove": [],
+      "disabled": false,
+      "command": "uvx",
+      "args": [
+        "awslabs.cloudwatch-mcp-server@latest"
+      ],
+      "env": {
+        "AWS_PROFILE": "default",
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "transportType": "stdio"
+    },
+    "slack-enterprise-mcp": {
+      "command": "slack-enterprise-mcp",
+      "args": [],
+      "disabled": false
+    }
+  }
+}
