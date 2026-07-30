@@ -13,7 +13,7 @@
       "name": "codeblue-ai",
       "description": "Investigates infrastructure problems, checks metrics and resource state, and explains findings with evidence.",
       "source": "./",
-      "strict": false,
+      "strict": true,
       "skills": [
         "./skills/cloudwatch",
         "./skills/ec2",
