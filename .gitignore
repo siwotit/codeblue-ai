@@ -26,4 +26,4 @@ htmlcov/
 *.swp
 
 # uv lockfile (optional, can be committed)
-# uv.lock
+# uv.lock.claude/
