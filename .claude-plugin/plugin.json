@@ -1,0 +1,12 @@
+{
+  "name": "codeblue-ai",
+  "version": "0.1.0",
+  "description": "AI diagnostic assistant for DevOps engineers. Investigates infrastructure problems, checks metrics and resource state, and explains findings with evidence.",
+  "author": "davidnw",
+  "skills": [
+    "./skills/cloudwatch",
+    "./skills/ec2",
+    "./skills/ecs",
+    "./skills/eks"
+  ]
+}
