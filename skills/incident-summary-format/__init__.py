@@ -1,1 +1,0 @@
-# Incident Summary Format Skill
