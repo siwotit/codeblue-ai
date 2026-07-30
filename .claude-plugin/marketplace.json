@@ -1,0 +1,25 @@
+{
+  "name": "codeblue-ai",
+  "owner": {
+    "name": "davidnw",
+    "email": ""
+  },
+  "metadata": {
+    "description": "AI diagnostic assistant for DevOps engineers",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "codeblue-ai",
+      "description": "Investigates infrastructure problems, checks metrics and resource state, and explains findings with evidence.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/cloudwatch",
+        "./skills/ec2",
+        "./skills/ecs",
+        "./skills/eks"
+      ]
+    }
+  ]
+}
