@@ -1,0 +1,35 @@
+{
+  "name": "codeblue-ai",
+  "version": "0.2.0",
+  "description": "Helps you investigate Amazon EKS issues from the AWS side. It finds what's wrong, shows the evidence, and tells you what to do next. Read-only, and it works with AWS APIs alone, so no kubectl is needed.",
+  "author": {
+    "name": "David Wainaina"
+  },
+  "keywords": [
+    "aws",
+    "eks",
+    "aws-diagnostics",
+    "devops",
+    "read-only"
+  ],
+  "userConfig": {
+    "aws_profile": {
+      "type": "string",
+      "title": "AWS profile",
+      "description": "AWS CLI profile the agent uses. Must be a READ-ONLY profile (e.g. ReadOnlyAccess).",
+      "default": "codeblue-aiagent"
+    },
+    "aws_mcp_region": {
+      "type": "string",
+      "title": "AWS MCP Server region",
+      "description": "Region of the AWS MCP Server endpoint. Must be a supported endpoint region (see the README). Independent of where your resources are.",
+      "default": "eu-central-1"
+    },
+    "aws_region": {
+      "type": "string",
+      "title": "Default region for your resources",
+      "description": "Default region for AWS API calls and CloudWatch queries, where your EKS clusters run. The agent uses another region when you name one.",
+      "default": "eu-central-1"
+    }
+  }
+}
