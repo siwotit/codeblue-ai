@@ -5,21 +5,16 @@
     "email": ""
   },
   "metadata": {
-    "description": "AI diagnostic assistant for DevOps engineers",
-    "version": "0.1.0"
+    "description": "First responder for Amazon EKS problems, read-only",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "codeblue-ai",
-      "description": "Investigates infrastructure problems, checks metrics and resource state, and explains findings with evidence.",
+      "description": "Helps you investigate Amazon EKS issues from the AWS side. It finds what's wrong, shows the evidence, and tells you what to do next. Read-only, and it works with AWS APIs alone, so no kubectl is needed.",
       "source": "./",
       "strict": true,
-      "skills": [
-        "./skills/cloudwatch",
-        "./skills/ec2",
-        "./skills/ecs",
-        "./skills/eks"
-      ]
+      "version": "0.2.0"
     }
   ]
 }
