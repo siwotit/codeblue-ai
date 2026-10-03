@@ -1,376 +1,259 @@
 ---
 name: eks
-description: Investigate EKS and Kubernetes cluster problems. Use when the engineer asks about pod crashes, node issues, deployments, scheduling failures, networking, addon health, or any Kubernetes-related question.
+description: Investigate EKS problems at the AWS layer. Use when nodes fail to join or get terminated, nodegroups report health issues, capacity/quota errors block scaling, a cluster or upgrade is unhealthy, authentication/access entries fail, or managed addons are degraded. Works via AWS APIs — no kubeconfig required.
 ---
 
-# EKS / Kubernetes Investigation
+# EKS Investigation (AWS Layer)
 
-Prerequisites: The user must have an authenticated kubeconfig (`kubectl` works in their shell). The agent uses `kubectl` commands directly for cluster inspection.
+Prerequisites: Read-only AWS credentials for the account owning the cluster. `kubectl` access is NOT required — this skill works entirely from AWS APIs (EKS, EC2, Auto Scaling, CloudTrail, CloudWatch). Where cluster access would add evidence, the skill says so explicitly.
+
+Scope: what AWS APIs can see — nodes/nodegroups, control plane, access/IAM, managed addons. Pod, workload, ingress, and in-cluster DNS investigation is out of scope for now (the Kubernetes layer comes later).
+
+## Handovers
+
+This skill owns the EKS-specific layer: nodegroup health, join failures, ASG/termination forensics, control plane, access entries, managed addons, and EKS-related CloudTrail. When the trail leaves that layer, hand over instead of duplicating.
+
+**→ `ec2` skill** — anything instance-level.
+Hand over when a specific instance needs a deep-dive: status checks, console output,
+EBS/CPU/network throttling, boot failures.
+
+**→ `cloudwatch` skill** — anything metrics or logs.
+Hand over when you need metric numbers, a baseline comparison ("is this anomalous?"),
+alarm state/history, or log queries.
+
+**→ The engineer** — anything requiring kubectl.
+This skill never runs kubectl. Give the engineer the exact commands to run
+(see "When Cluster Access Is Needed").
+
+**Always pass context on handover:**
+- instance ID(s)
+- cluster and nodegroup name
+- the time window
+- the specific question you need answered
+
+## Entry Point: Cluster First
+
+Confirm account, region, and cluster name before anything else. A "cluster not found" may just be the wrong region.
+
+```bash
+aws eks describe-cluster --name <cluster>   # status, version, endpoint access, accessConfig.authenticationMode, logging, VPC config
+aws eks list-nodegroups --cluster-name <cluster>
+aws eks list-addons --cluster-name <cluster>
+```
+
+Then identify how the nodes are provided and route to the matching branch below:
+- **Managed nodegroup:** `describe-nodegroup` → `.nodegroup.health.issues[]` is the primary signal (code, message, resourceIds).
+- **Karpenter or self-managed:** no nodegroup object. Work through the ASG/EC2 branches using the instances' tags (`karpenter.sh/nodepool`, `kubernetes.io/cluster/<name>`).
 
 ## Decision Tree
 
 ```
 Problem received → What type?
 │
-├─ "Pods are crashing" / CrashLoopBackOff / OOMKilled
-│  → kubectl get pods -n <namespace> (identify failing pods)
-│  → kubectl describe pod <pod> -n <namespace> (events, conditions, container statuses)
-│  → Check container state: Waiting? Terminated? What reason?
-│  → kubectl logs <pod> -n <namespace> (current logs)
-│  → kubectl logs <pod> -n <namespace> --previous (logs from last crash)
-│  → If OOMKilled: check resource limits vs actual usage
-│  → If CrashLoopBackOff: check exit code and logs from previous run
+├─ "Nodes not joining the cluster" / nodegroup Degraded / NodeCreationFailure
+│  → describe-nodegroup → read health.issues[].code (see Health Issue Codes table)
+│  → Did the instance even launch?
+│    - aws autoscaling describe-scaling-activities --auto-scaling-group-name <asg>
+│    - Launch failed → capacity/quota/launch-template branch below
+│    - Launch succeeded but node never registered → bootstrap/network problem:
+│  → Check the instance itself:
+│    - aws ec2 describe-instances --instance-ids <id> (state, subnet, SG, IAM profile, AMI)
+│    - aws ec2 get-console-output --instance-id <id> (bootstrap errors, kubelet failing to reach API)
+│  → The four usual causes, in order of frequency:
+│    1. IAM: node role not authorized to join
+│       - Access entries: aws eks list-access-entries --cluster-name <cluster>
+│         (node role needs type EC2_LINUX/EC2_WINDOWS entry, or aws-auth mapping on older clusters)
+│       - Role missing policies: AmazonEKSWorkerNodePolicy, AmazonEC2ContainerRegistryReadOnly, CNI policy
+│    2. Network: node can't reach the API server
+│       - Private-only endpoint? Node subnet needs route to it (and cluster SG must allow 443 from node SG)
+│       - No NAT/IGW and no VPC endpoints → can't pull images or reach EKS/ECR/S3/EC2 APIs
+│       - aws ec2 describe-subnets --subnet-ids <ids> (check AvailableIpAddressCount — exhaustion blocks ENIs)
+│    3. AMI/version mismatch: node AMI more than 2 minor versions off control plane, or custom AMI missing bootstrap
+│    4. Launch template: bad user data (missing/duplicated bootstrap), wrong SG, IMDSv2 hop limit 1 blocking containers
+│  → Watch for the recycle loop: node launches → fails to join → ASG health check replaces it (~15 min cycle).
+│    Scaling activities showing repeated launch+terminate pairs = joining failure, not termination problem.
 │
-├─ "Pods stuck Pending" / scheduling failures
-│  → kubectl describe pod <pod> (look at Events section for scheduling errors)
-│  → Common reasons:
-│    - Insufficient CPU/memory (no node with enough resources)
-│    - Node selector or affinity rules can't be satisfied
-│    - Taints on all nodes that the pod doesn't tolerate
-│    - PVC can't be bound (storage class, AZ mismatch)
-│  → kubectl get nodes -o wide (check node count and status)
-│  → kubectl describe nodes (check Allocatable vs Allocated resources)
-│  → Check if cluster autoscaler or Karpenter should be adding nodes
+├─ "Nodes being terminated" / instances disappearing / nodes recycled
+│  → Who terminated it? Three sources of truth, check in order:
+│    1. ASG activity: aws autoscaling describe-scaling-activities (cause field says health check,
+│       scale-in, rebalance, or instance refresh)
+│    2. CloudTrail: TerminateInstances event → userIdentity tells you WHO
+│       (autoscaling.amazonaws.com = ASG, assumed role with "karpenter" = Karpenter, a human = a human)
+│    3. Spot: check instance lifecycle (aws ec2 describe-instances → InstanceLifecycle=spot);
+│       CloudTrail BidEvictedEvent / instance state change with Spot interruption; ASG capacity-rebalance setting
+│  → Common patterns:
+│    - Scale-in by Cluster Autoscaler/Karpenter consolidation: expected, verify it's not too aggressive
+│    - ASG AZRebalance terminating healthy nodes: check SuspendedProcesses
+│    - Health-check replacement loop: see "nodes not joining" above — the join failure is the root cause
+│    - Nodegroup update/instance refresh in progress: aws eks describe-update / describe-instance-refreshes
+│    - Spot interruptions clustering in one AZ/instance type: diversify or move critical workloads to on-demand
 │
-├─ "Node issues" / NotReady / node pressure
-│  → kubectl get nodes (identify NotReady or SchedulingDisabled nodes)
-│  → kubectl describe node <node> (check Conditions section)
-│  → Conditions to look for:
-│    - Ready=False: kubelet failure, node crashed, network partition
-│    - MemoryPressure=True: node running low on memory, will evict pods
-│    - DiskPressure=True: node disk full, will evict pods
-│    - PIDPressure=True: too many processes
-│  → Check underlying EC2 instance (use ec2 skill if needed)
-│  → Check if node was cordoned/drained (kubectl get node -o yaml | grep -i taint)
-│  → Check EKS managed nodegroup health (eks:DescribeNodegroup via AWS API)
+├─ "Nodes NotReady" (AWS-side evidence; confirming kubelet state needs cluster access)
+│  → Map node → instance ID (node providerID "aws:///<az>/<instance-id>", or instance tags). Then check, in order:
+│  → Scope first: ALL nodes NotReady (control plane/network-wide, or a recent nodegroup update/AMI change —
+│    list-updates, launch template versions) or ONE node (instance-local)?
+│  → Instance health: status checks (system vs instance), scheduled events, stop/reboot, console output
+│    (OOM kills, I/O errors, kubelet/containerd failures) — ec2 skill for the detail.
+│  → Resource starvation (the usual cause when CPU/memory is high). Pull CloudWatch for the window around NotReady:
+│    - CPUUtilization sustained near 100%; CPUCreditBalance at 0 on t-series (throttled to baseline)
+│    - EBS throttling — the frequent hidden culprit. Check ALL of:
+│      - per volume (AWS/EBS): VolumeIOPSExceededCheck, VolumeThroughputExceededCheck, BurstBalance (gp2)
+│      - per instance (AWS/EC2): InstanceEBSIOPSExceededCheck, InstanceEBSThroughputExceededCheck
+│      - Mechanism: kubelet/containerd block on disk I/O (image pulls, logs, container writes on the root volume),
+│        miss node heartbeats, and the node goes NotReady while CPU looks high from I/O wait.
+│    - Network allowance exceeded (ENA metrics, only if the CloudWatch agent collects them)
+│    - Memory: EC2 publishes none by default. Only present if the CloudWatch agent is installed (CWAgent namespace).
+│      If absent, say memory could not be checked.
+│  → Line the timeline up: NotReady time vs metric spikes vs status checks. A throttle or credit exhaustion that
+│    starts just before NotReady is strong evidence; one that starts after is not.
+│  → Metric names and thresholds are detailed in the ec2 skill — hand over there for the deep-dive.
+│  → What this layer CANNOT see without cluster access: kubelet logs, node conditions
+│    (MemoryPressure/DiskPressure/PIDPressure), taints. If AWS-side is clean or inconclusive, hand the engineer:
+│    kubectl describe node <node>  — and read the Conditions and Events sections.
 │
-├─ "Deployment not rolling out" / stuck rollout
-│  → kubectl rollout status deployment/<name> -n <namespace>
-│  → kubectl get replicasets -n <namespace> (old vs new RS)
-│  → kubectl describe deployment <name> -n <namespace> (events, conditions)
-│  → If new pods failing: investigate those pods (see "Pods are crashing" above)
-│  → Check deployment strategy (RollingUpdate maxUnavailable/maxSurge)
-│  → kubectl rollout history deployment/<name> (what changed between revisions)
-│  → Compare old vs new pod template (image, env vars, resources, volumes)
+├─ "Volume problem" / EBS attach failures / volume stuck (AWS-side view only)
+│  → aws ec2 describe-volumes --volume-ids <id> → State, Attachments[], AvailabilityZone, Encrypted, KmsKeyId
+│  → AZ mismatch: an EBS volume attaches only to instances in its own AZ — compare with the node's AZ
+│  → Stuck "attaching"/"busy" with no customer-side cause → see AWS escalation guidance
+│  → Encrypted volume: KMS key policy must allow the CSI driver/node role (and ASG service-linked role for launches)
+│  → Attachment limit: instance types cap attached volumes/ENIs — compare attachment count to the type's limit
+│  → Recent changes: CloudTrail AttachVolume/DetachVolume/ModifyVolume/DeleteVolume
+│  → PVC/PV/pod state needs cluster access — hand the engineer:
+│    kubectl get pvc,pv -A ; kubectl describe pvc <pvc> -n <ns>
 │
-├─ "Service/ingress not working" / can't reach the app / ALB issues
-│  → kubectl get svc -n <namespace> (check service exists, type, ports)
-│  → kubectl get endpoints -n <namespace> (does the service have endpoints?)
-│  → No endpoints = no pods match the service selector
-│  → kubectl get pods -n <namespace> -l <selector-labels> (check pod labels match)
-│  → Check if pods are ready (readiness probe passing)
-│  → Check NetworkPolicies that might block traffic
-│  →
-│  → Port chain validation (trace the full path):
-│    - Ingress backend port → must match Service port
-│    - Service port → maps to targetPort on the pod
-│    - targetPort → must match containerPort in the pod spec
-│    - If ANY link mismatches: traffic reaches the service but gets connection refused
-│    - kubectl get svc <name> -o yaml (check ports[].port and ports[].targetPort)
-│    - kubectl get pod <pod> -o jsonpath='{.spec.containers[*].ports}'
-│    - Example mismatch: Ingress → svc:80 → targetPort:8080, but container listens on 3000
-│  →
-│  → If using AWS Load Balancer Controller:
-│    - kubectl get ingress -n <namespace> (check rules, annotations, ADDRESS field)
-│    - kubectl get targetgroupbindings -n <namespace> (TGB status and target group ARN)
-│    - kubectl describe targetgroupbinding <name> (check conditions, events)
-│    - kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100
-│    - Check for IngressGroup (shared ALB): annotation `alb.ingress.kubernetes.io/group.name`
-│    - If ALB not creating: check LBC logs for "failed to reconcile" errors
-│    - If targets unhealthy: check target group health (AWS API), check pod readiness, check SG allows ALB → pod traffic
-│    - Common annotations to verify:
-│      * alb.ingress.kubernetes.io/scheme (internal vs internet-facing)
-│      * alb.ingress.kubernetes.io/target-type (ip vs instance)
-│      * alb.ingress.kubernetes.io/listen-ports
-│      * alb.ingress.kubernetes.io/certificate-arn (TLS)
-│      * alb.ingress.kubernetes.io/healthcheck-path
-│  →
-│  → If using Gateway API:
-│    - kubectl get gateways -A (check gateway status and listeners)
-│    - kubectl get httproutes -A (check routes, backends, conditions)
-│    - kubectl describe gateway <name> (check Accepted/Programmed conditions)
-│    - kubectl describe httproute <name> (check ResolvedRefs, Accepted conditions)
-│    - If route not working: check parentRefs points to correct gateway
-│    - If backend not reachable: check backendRefs service name and port
-│  →
-│  → If TLS / cert-manager involved:
-│    - kubectl get certificates -n <namespace> (check Ready status)
-│    - kubectl describe certificate <name> (conditions, events, renewal status)
-│    - kubectl get certificaterequests -n <namespace> (pending requests)
-│    - kubectl get orders -n <namespace> (ACME challenge status)
-│    - kubectl get challenges -n <namespace> (DNS/HTTP challenge state)
-│    - kubectl logs -n cert-manager -l app=cert-manager --tail=100
-│    - Common issues:
-│      * Certificate stuck NotReady: check Order and Challenge status
-│      * DNS01 challenge failing: Route53 permissions, zone ID mismatch
-│      * HTTP01 challenge failing: ingress not routing /.well-known/acme-challenge
-│      * Certificate expired: check `renewalTime` and cert-manager logs for renewal errors
+├─ "Can't scale up" / InsufficientInstanceCapacity / quota errors
+│  → ASG scaling activities show the exact launch error:
+│    - InsufficientInstanceCapacity: AWS out of that type in that AZ — not your config.
+│      Mitigate: more instance types in the nodegroup, more AZs/subnets, different size
+│    - VcpuLimitExceeded / instance quota: aws service-quotas get-service-quota
+│      --service-code ec2 --quota-code L-1216C47A (Running On-Demand Standard instances)
+│    - MaxSpotInstanceCountExceeded: spot vCPU quota
+│    - Client.InternalError or encrypted-AMI launch failures: KMS key policy missing ASG service-linked role grant
+│  → Also check: nodegroup already at maxSize (describe-nodegroup → scalingConfig),
+│    subnet IP exhaustion (describe-subnets → AvailableIpAddressCount)
 │
-├─ "Addon is degraded" / CoreDNS / VPC CNI / kube-proxy / EBS CSI
-│  → eks:DescribeAddon via AWS API (check addon status and health issues)
-│  → kubectl get pods -n kube-system -l <addon-label> (are addon pods running?)
-│  → kubectl describe pod <addon-pod> -n kube-system (events, restarts)
-│  → kubectl logs <addon-pod> -n kube-system (addon-specific errors)
-│  → Addon-specific checks:
-│    - VPC CNI: kubectl get ds aws-node -n kube-system; check WARM_ENI_TARGET, IP allocation
-│    - CoreDNS: kubectl get deploy coredns -n kube-system; check for OOM, restarts
-│    - kube-proxy: kubectl get ds kube-proxy -n kube-system
-│    - EBS CSI: kubectl get pods -n kube-system -l app=ebs-csi-controller
+├─ "Cluster unhealthy" / upgrade stuck or failed / API server errors
+│  → aws eks describe-cluster → status (ACTIVE/UPDATING/FAILED), version, endpoint access, health.issues
+│  → aws eks list-updates --name <cluster>, then describe-update → status and errors[]
+│  → Upgrade blockers: subnets with <5 free IPs, cluster role deleted, KMS key for secrets encryption disabled
+│  → Control plane logs (api, audit, authenticator, controllerManager, scheduler):
+│    - FIRST check describe-cluster → logging.clusterLogging. Logs exist only for types with enabled=true.
+│    - Not enabled → say so. There is no history to search; recommend enabling the needed types and re-checking after it recurs.
+│    - Enabled → hand over to the cloudwatch skill, log group /aws/eks/<cluster>/cluster
+│      (streams: kube-apiserver-*, authenticator-*, kube-apiserver-audit-*). Note log retention may cut off the window.
+│  → API server unreachable with status ACTIVE and no customer change → AWS Support case
 │
-├─ "DNS not resolving" / service discovery failures
-│  → kubectl run -it --rm debug --image=busybox -- nslookup kubernetes.default
-│  → If DNS fails: CoreDNS is the problem — OR the node is network-throttled
-│  → kubectl get pods -n kube-system -l k8s-app=kube-dns (CoreDNS pod status)
-│  → kubectl logs -n kube-system -l k8s-app=kube-dns (CoreDNS errors)
-│  → Check if CoreDNS pods are OOMKilled or crashlooping
-│  → Check CoreDNS configmap (kubectl get configmap coredns -n kube-system -o yaml)
-│  → Check if pod's /etc/resolv.conf points to the right ClusterIP
-│  →
-│  → If CoreDNS is healthy but DNS still fails — suspect node network throttling:
-│    - Identify which node the affected pod runs on (kubectl get pod -o wide)
-│    - Check EC2 NetworkIn/NetworkOut for that node's instance (CloudWatch)
-│    - If CW Agent is installed: check bw_out_allowance_exceeded and pps_allowance_exceeded
-│    - If CW Agent NOT installed (common): look for indirect signals:
-│      * Multiple pods on the same node all showing DNS timeouts
-│      * Node is otherwise healthy (CPU/mem fine via kubectl top node)
-│      * Instance type is small or "up to" bandwidth (t3, t3a, m5.large, etc.)
-│      * Other symptoms: connection timeouts to external services, slow image pulls
-│    - DNS is especially vulnerable to PPS throttling (many small UDP packets)
-│    - linklocal_allowance_exceeded specifically throttles DNS to the VPC resolver (169.254.169.253)
-│    - Fix: larger instance type, spread pods across more nodes, or use NodeLocal DNSCache
-│    - To confirm throttling:
-│      1. Check if EKS Container Network Observability is enabled (VPC CNI v1.14+)
-│         — collects ENA throttling metrics per-node, works on Bottlerocket
-│         — metrics in CloudWatch under ContainerInsights namespace with node_net_* prefix
-│      2. Check CloudWatch for CWAgent namespace metrics (bw_out_allowance_exceeded, pps_allowance_exceeded)
-│         — requires CloudWatch Observability Add-on or CW Agent DaemonSet with ethtool plugin
-│      3. If neither is configured: ask the engineer to run on the node:
-│         ethtool -S eth0 | grep allowance_exceeded
-│      4. Note: Standard Container Insights (without network observability) does NOT collect ENA throttling counters
+├─ "Access denied" / can't authenticate / nodes or roles rejected
+│  → aws eks describe-cluster → accessConfig.authenticationMode (API, API_AND_CONFIG_MAP, CONFIG_MAP)
+│  → aws eks list-access-entries / describe-access-entry / list-associated-access-policies for the principal
+│  → CONFIG_MAP mode: aws-auth needs cluster access to read — hand kubectl command to engineer
+│  → IRSA / Pod Identity (workload gets AWS AccessDenied):
+│    - aws eks list-pod-identity-associations --cluster-name <cluster>
+│    - aws iam get-role → trust policy must match the OIDC provider (aws iam list-open-id-connect-providers)
+│      and the service account subject, or the pods.eks.amazonaws.com principal
+│  → CloudTrail for the denied call shows which principal was actually used
+│  → Authenticator control plane logs (if enabled, see above) show the rejected ARN
 │
-├─ "What changed?" / cluster was fine before
-│  → kubectl get events --sort-by='.lastTimestamp' -A (recent cluster-wide events)
-│  → kubectl rollout history for relevant deployments
-│  → Check CloudTrail for EKS API calls:
-│    - UpdateClusterConfig, UpdateNodegroupConfig
-│    - CreateAddon, UpdateAddon, DeleteAddon
-│    - CreateNodegroup, DeleteNodegroup
-│  → Check if a Helm release was upgraded (helm history <release>)
-│  → Compare before/after: what's different in the deployment, configmap, or secret?
+├─ "Addon problem" / addon degraded / CoreDNS, CNI, kube-proxy, EBS CSI issues
+│  → aws eks list-addons, describe-addon → status, health.issues[], addonVersion, serviceAccountRoleArn
+│  → aws eks describe-addon-versions --addon-name <a> --kubernetes-version <v> (is the version compatible?)
+│  → Addon update history: list-updates --addon-name; CloudTrail UpdateAddon
+│  → Common: addon role missing/trust broken (IRSA), version skew after control plane upgrade,
+│    vpc-cni failing on subnet IP exhaustion (describe-subnets → AvailableIpAddressCount)
+│  → Pod-level addon state (restarts, logs) needs kubectl — hand to engineer
 │
-├─ "PVC won't bind" / storage issues
-│  → kubectl get pvc -n <namespace> (check status: Pending, Bound, Lost)
-│  → kubectl describe pvc <name> (events showing why it's stuck)
-│  → Common causes:
-│    - StorageClass doesn't exist or is misconfigured
-│    - EBS CSI driver not installed or degraded
-│    - AZ mismatch (PV in us-east-1a, pod scheduled in us-east-1b)
-│    - Insufficient EBS quota
-│  → kubectl get storageclass (check default, provisioner, parameters)
-│  → Check EBS CSI driver pods are healthy
-│
-└─ "Cluster is slow" / general performance
-   → kubectl top nodes (CPU/memory usage per node)
-   → kubectl top pods -n <namespace> (resource consumption per pod)
-   → Check CloudWatch Container Insights metrics (cluster, node, pod level)
-   → Check if HPA is maxed out (kubectl get hpa -n <namespace>)
-   → Check if nodes are overcommitted (Allocatable vs requests vs actual usage)
-   → Look for noisy neighbors (one pod consuming disproportionate resources)
+└─ "What changed?" / nodes were fine before
+   → CloudTrail, last 24-48h, filtered to the cluster/nodegroup (see CloudTrail Events table)
+   → aws eks list-updates --name <cluster> / describe-update (version upgrades, config changes)
+   → Launch template versions: aws ec2 describe-launch-template-versions (new default version = new AMI/user data)
+   → New AMI release for the same template version pin ($Latest resolves differently over time)
 ```
 
-## Key Patterns
+## Health Issue Codes (describe-nodegroup)
 
-### Pod Failure Classification
+| Code | Meaning | Where to look next |
+|------|---------|-------------------|
+| NodeCreationFailure | Instances launched but never joined | IAM access entry, network path to API server, console output |
+| IamNodeRoleNotFound / IamInstanceProfileNotFound | Node role/profile deleted or inaccessible | IAM — recreate or fix the role, check it wasn't deleted in CloudTrail |
+| AsgInstanceLaunchFailures | ASG can't launch instances at all | Scaling activities — capacity, quota, launch template, KMS |
+| Ec2LaunchTemplateVersionMismatch | ASG template version ≠ nodegroup's expected version | Someone edited the template outside EKS — reconcile via nodegroup update |
+| Ec2LaunchTemplateNotFound | Launch template deleted | CloudTrail DeleteLaunchTemplate |
+| InsufficientFreeAddresses | Subnet out of IPs | describe-subnets — add subnets or free IPs |
+| Ec2SecurityGroupDeletionFailure / NotFound | SG dependency problems | Check SGs referenced by the launch template |
+| ClusterUnreachable | EKS can't reach its own cluster | Control-plane side — recommend AWS Support case |
+| AccessDenied | Nodegroup role can't call required APIs | Service-linked role AWSServiceRoleForAmazonEKSNodegroup, SCPs |
+| AutoScalingGroupInvalidConfiguration | ASG config drifted from nodegroup spec | Manual ASG edits — reconcile via EKS |
 
-| Status | Reason | Meaning | Action |
-|--------|--------|---------|--------|
-| Waiting | CrashLoopBackOff | Container keeps crashing and restarting | Check logs --previous, check exit code |
-| Waiting | ImagePullBackOff | Can't pull the container image | Check image name/tag, registry auth, network |
-| Waiting | ErrImagePull | Same as above, first failure | Same as above |
-| Waiting | CreateContainerConfigError | Bad config (missing secret, configmap) | kubectl describe pod — check events |
-| Terminated | OOMKilled | Container exceeded memory limit | Increase resources.limits.memory |
-| Terminated | Error (exit 1) | Application crashed | Check logs for stack trace |
-| Terminated | Completed (exit 0) | Container finished normally | Expected for Jobs, not for long-running pods |
-
-### kubectl Commands Reference
-
-**Pods:**
-```bash
-kubectl get pods -n <ns>                          # List pods and their status
-kubectl describe pod <pod> -n <ns>                # Full details, events, conditions
-kubectl logs <pod> -n <ns>                        # Current container logs
-kubectl logs <pod> -n <ns> --previous             # Previous container logs (after crash)
-kubectl logs <pod> -n <ns> -c <container>         # Specific container in multi-container pod
-kubectl get pod <pod> -n <ns> -o yaml             # Full pod spec
-```
-
-**Nodes:**
-```bash
-kubectl get nodes -o wide                         # Node list with IPs, versions
-kubectl describe node <node>                      # Conditions, capacity, allocated resources
-kubectl top nodes                                 # CPU/memory usage (requires metrics-server)
-kubectl get node <node> -o jsonpath='{.spec.taints}'  # Check taints
-```
-
-**Deployments:**
-```bash
-kubectl rollout status deployment/<name> -n <ns>  # Rollout progress
-kubectl rollout history deployment/<name> -n <ns> # Revision history
-kubectl get rs -n <ns>                            # ReplicaSets (old vs new)
-kubectl diff -f <manifest>                        # What would change
-```
-
-**Events and debugging:**
-```bash
-kubectl get events -n <ns> --sort-by='.lastTimestamp'  # Recent events
-kubectl get events -A --field-selector reason=FailedScheduling  # Scheduling failures
-kubectl get events -A --field-selector type=Warning    # All warnings
-```
-
-**Networking:**
-```bash
-kubectl get svc -n <ns>                           # Services
-kubectl get endpoints -n <ns>                     # Service endpoints (which pods back it)
-kubectl get ingress -n <ns>                       # Ingress rules
-kubectl get networkpolicy -n <ns>                 # Network policies
-```
-
-### Node Conditions
-
-| Condition | True means | Impact |
-|-----------|-----------|--------|
-| Ready=False | Kubelet unhealthy or unreachable | Pods on this node are orphaned |
-| MemoryPressure | Memory running low | Kubelet will evict pods (BestEffort first) |
-| DiskPressure | Disk running low | Kubelet will evict pods, refuse new ones |
-| PIDPressure | Too many processes | Kubelet will refuse new pods |
-| NetworkUnavailable | Node networking broken | Pods can't communicate |
-
-### EKS Addons
-
-| Addon | What it does | If degraded |
-|-------|-------------|-------------|
-| vpc-cni (aws-node) | Assigns IPs to pods from VPC subnets | Pods stuck in ContainerCreating, no IP |
-| coredns | Cluster DNS resolution | Service discovery fails, DNS timeouts |
-| kube-proxy | iptables/IPVS rules for services | ClusterIP services unreachable |
-| aws-ebs-csi-driver | Provisions EBS volumes for PVCs | PVCs stuck Pending, volumes don't attach |
-| aws-efs-csi-driver | Provisions EFS volumes | EFS-backed PVCs don't mount |
-
-### AWS Load Balancer Controller (LBC)
-
-The LBC manages ALBs and NLBs based on Ingress and Service resources. Key debugging:
+## Termination Forensics
 
 ```bash
-# Check LBC pods are running
-kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+# ASG decisions with reasons (cause field is prose and names the trigger)
+aws autoscaling describe-scaling-activities --auto-scaling-group-name <asg> --max-items 20
 
-# LBC logs (most errors show here)
-kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100
+# Who called TerminateInstances
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=TerminateInstances \
+  --start-time <ISO> --end-time <ISO>
 
-# Check TargetGroupBindings (maps K8s service to AWS target group)
-kubectl get targetgroupbindings -A
-kubectl describe targetgroupbinding <name> -n <namespace>
+# Spot vs on-demand, and lifecycle state
+aws ec2 describe-instances --instance-ids <id> \
+  --query 'Reservations[].Instances[].{Lifecycle:InstanceLifecycle,State:State.Name,Reason:StateTransitionReason}'
 
-# Check Ingress status (ADDRESS should show ALB DNS)
-kubectl get ingress -n <namespace>
-kubectl describe ingress <name> -n <namespace>
+# In-flight nodegroup updates / instance refreshes
+aws eks list-updates --name <cluster>
+aws autoscaling describe-instance-refreshes --auto-scaling-group-name <asg>
 ```
 
-**Common LBC problems:**
+| Terminator (CloudTrail userIdentity) | Meaning |
+|--------------------------------------|---------|
+| autoscaling.amazonaws.com | ASG: health check, scale-in, rebalance, or instance refresh — read the scaling activity cause |
+| Role containing "karpenter" | Karpenter consolidation/expiration/drift — check Karpenter's own events if cluster access exists |
+| eks.amazonaws.com / nodegroup role | Managed nodegroup update rolling nodes |
+| ec2-spot | Spot interruption |
+| A human or CI role | Someone did it — check the session name |
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Ingress has no ADDRESS | LBC can't create ALB — check LBC logs | IAM permissions, subnet tags, or security group issues |
-| ALB exists but targets unhealthy | Pod not ready or SG blocks ALB→pod | Check target-type (ip vs instance), verify SG allows ALB traffic |
-| 404 from ALB | No matching rule for the request | Check ingress path rules and host matching |
-| Mixed HTTP/HTTPS not working | Missing `listen-ports` annotation or certificate-arn | Add `alb.ingress.kubernetes.io/listen-ports` and `certificate-arn` |
-| IngressGroup not sharing ALB | group.name annotation mismatch or different scheme | All ingresses in a group must have same scheme (internal/internet-facing) |
-
-### cert-manager / TLS Troubleshooting
-
-```bash
-# Full certificate lifecycle check
-kubectl get certificates -n <namespace>           # Is it Ready?
-kubectl describe certificate <name>               # Conditions, events
-kubectl get certificaterequests -n <namespace>    # Request status
-kubectl get orders -n <namespace>                 # ACME order status
-kubectl get challenges -n <namespace>             # Challenge in progress?
-
-# cert-manager logs
-kubectl logs -n cert-manager -l app=cert-manager --tail=100
-kubectl logs -n cert-manager -l app=cert-manager-webhook --tail=50
-```
-
-**Certificate not becoming Ready — trace the chain:**
-```
-Certificate → CertificateRequest → Order → Challenge(s)
-```
-Each level can fail independently. Check from right to left (Challenge first).
-
-**Common cert-manager problems:**
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Challenge stuck Pending | DNS01: Route53 IAM permissions or wrong zone ID. HTTP01: ingress not serving /.well-known/acme-challenge | Fix IAM or check LBC is routing ACME paths |
-| Order failed | Rate limiting by Let's Encrypt, or invalid domain | Check order events, wait for rate limit reset |
-| Certificate expired despite cert-manager running | Renewal failed silently — check cert-manager logs | Fix the underlying issue (usually DNS01 permissions changed) |
-| Webhook timeout | cert-manager-webhook pod not ready | Check webhook pod status and network policies |
-
-### VPC CNI Specific Issues
-
-The VPC CNI (aws-node DaemonSet) is the most common source of EKS networking problems:
-
-```bash
-kubectl get ds aws-node -n kube-system                    # Is it running on all nodes?
-kubectl logs -n kube-system -l k8s-app=aws-node --tail=50 # Recent errors
-kubectl get eniconfigs                                     # Custom networking config (if used)
-```
-
-**Common VPC CNI problems:**
-- **Pods stuck in ContainerCreating with "failed to assign an IP address"**: Subnet has no free IPs, or ENI limit reached on the node
-- **Warm pool issues**: Check `WARM_ENI_TARGET` and `WARM_IP_TARGET` env vars on the aws-node DaemonSet
-- **Secondary IP exhaustion**: Instance type determines max pods (ENIs × IPs-per-ENI)
-- **Custom networking misconfigured**: ENIConfig doesn't match the node's AZ
-
-### Resource Requests and Limits
-
-When pods can't schedule or get OOMKilled:
-
-```bash
-# Check what a pod requests vs its limit
-kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources}'
-
-# Check node allocatable vs what's already allocated
-kubectl describe node <node> | grep -A 5 "Allocated resources"
-```
-
-**Key insight:** If sum of all pod `requests` on a node exceeds node `allocatable`, new pods can't schedule. But if `limits` exceed allocatable, pods can use burst resources until they get OOMKilled.
-
-## CloudTrail Events for EKS
+## CloudTrail Events for Node Lifecycle
 
 | Event | Significance |
 |-------|-------------|
-| UpdateClusterConfig | Cluster settings changed (logging, networking, auth) |
-| UpdateClusterVersion | Cluster upgrade initiated |
-| CreateNodegroup / UpdateNodegroupConfig | Nodegroup changes |
-| DeleteNodegroup | Capacity removed |
-| CreateAddon / UpdateAddon / DeleteAddon | Addon lifecycle |
-| AssociateEncryptionConfig | Encryption settings changed |
+| CreateNodegroup / DeleteNodegroup | Capacity added/removed |
+| UpdateNodegroupConfig / UpdateNodegroupVersion | Scaling config, labels/taints, or AMI version changed |
+| UpdateClusterVersion | Control plane upgrade — nodes may now lag in version skew |
+| TerminateInstances / StopInstances / RebootInstances | Direct instance action — check userIdentity |
+| CreateLaunchTemplateVersion / ModifyLaunchTemplate | New user data/AMI/SG for future nodes |
+| DeleteLaunchTemplate / DeleteRole | Dependency deleted out from under the nodegroup |
+| UpdateAutoScalingGroup / SuspendProcesses / ResumeProcesses | Manual ASG drift |
+| CreateAccessEntry / DeleteAccessEntry / AssociateAccessPolicy | Node or user auth to the cluster granted/revoked |
+| UpdateClusterConfig / UpdateClusterVersion | Logging, endpoint access, or version changed |
+| CreateAddon / UpdateAddon / DeleteAddon | Managed addon changed |
+
+## When Cluster Access Is Needed
+
+This skill stops at the AWS boundary. Hand these to the engineer when the trail crosses it:
+
+```bash
+kubectl get nodes -o wide                  # which nodes K8s actually sees, and their status
+kubectl describe node <node>               # Conditions (MemoryPressure/DiskPressure), taints, events
+kubectl get events -A --field-selector involvedObject.kind=Node
+```
+
+Signals that the problem is on the Kubernetes side (and AWS-side is likely clean): instance running and healthy in EC2 but NotReady in the cluster, join succeeded but node immediately cordoned, pressure conditions with normal EC2 metrics.
 
 ## What to Report
 
-- Cluster health (nodes ready, addon status)
-- Specific pod/deployment failures with reasons and evidence from events/logs
-- Whether the issue is scheduling (capacity), application (crash), networking (DNS/CNI), or configuration (bad manifest)
-- What changed recently (rollout, addon update, nodegroup change)
-- Recommended fix (specific: "increase memory limit to X", "add toleration for taint Y", "scale nodegroup to Z nodes")
-- What you couldn't verify
+- Cluster/nodegroup/addon status and any health issue codes, verbatim
+- The lifecycle timeline: launched when, joined or not, terminated when and by whom (with CloudTrail/ASG evidence)
+- Whether the failure is auth (IAM/access entries), network (subnets/SGs/endpoints), capacity (AWS or quota), configuration (launch template/AMI), or AWS-side (status checks, ClusterUnreachable)
+- What changed recently (CloudTrail, launch template versions, nodegroup updates)
+- Recommended fix, specific: "add an EC2_LINUX access entry for role X", "add subnet Y to the nodegroup", "raise quota L-1216C47A to Z vCPUs"
+- What you couldn't verify — especially anything requiring cluster access, with the exact kubectl commands to run
 
 For a complete example of a well-structured investigation output, see [examples/investigation-output.md](examples/investigation-output.md).
 
 ## Tool Usage
 
-- **kubectl** (via shell): Primary investigation tool for cluster state, pods, nodes, events, logs
-- **awslabs.aws-api-mcp-server**: EKS control plane (DescribeCluster, DescribeAddon, DescribeNodegroup)
-- **awslabs.cloudwatch-mcp-server**: Container Insights metrics, log groups for EKS
+- **aws-mcp** (AWS MCP Server, `run_script`, read-only): primary — EKS (DescribeCluster/Nodegroup/Addon, ListUpdates, ListAccessEntries, ListPodIdentityAssociations), IAM get/list, Auto Scaling (DescribeScalingActivities, DescribeInstanceRefreshes), CloudTrail LookupEvents, Service Quotas, and the EC2 describe calls needed for join diagnosis (instance state, subnets, launch templates, console output)
+- **ec2 skill**: hand over for any instance deep-dive (status checks, performance, EBS/credit throttling, boot issues)
+- **cloudwatch skill**: hand over for metric numbers, baselines, alarms, and log queries (including control plane logs, only when logging is enabled on the cluster)
+- **kubectl**: NOT used by this skill — when cluster-side evidence is needed, give the engineer the commands to run
 
-**Important:** Only use read-only kubectl commands (get, describe, logs, top). Never use apply, delete, patch, scale, edit, drain, cordon, taint, or exec.
+**Important:** Read-only only. Describe/list/get/lookup calls exclusively. Never terminate, scale, update, or modify anything.

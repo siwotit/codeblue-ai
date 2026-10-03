@@ -1,90 +1,53 @@
-# Example: EKS Investigation Output
+# Example: EKS Investigation Output (AWS Layer)
 
 ---
 
 ## Engineer's question
 
-> "Pods in the checkout namespace on prod-cluster are in CrashLoopBackOff since this morning. We deployed a new version last night."
+> "Our new nodegroup `workers-v2` on prod-cluster has been stuck creating for 40 minutes. Nodes launch but never show up in the cluster."
 
 ## Investigation result
 
-**Cluster: prod-cluster** (eu-central-1, EKS 1.29)
-**Namespace: checkout**
+**Cluster: prod-cluster** (eu-central-1, EKS 1.29, status ACTIVE)
+**Nodegroup: workers-v2** (status CREATE_FAILED, desired 3)
 
-### Pod Status
-
-```
-NAME                               READY   STATUS             RESTARTS   AGE
-checkout-api-6b8f9c4d7-abc12      0/1     CrashLoopBackOff   47         8h
-checkout-api-6b8f9c4d7-def34      0/1     CrashLoopBackOff   47         8h
-checkout-api-6b8f9c4d7-ghi56      0/1     CrashLoopBackOff   47         8h
-checkout-api-5a7e8b3c6-jkl78      1/1     Running            0          3d    ← old ReplicaSet
-```
-
-### Pod Events (from describe)
+### Nodegroup health
 
 ```
-Warning  BackOff  2m (x47 over 8h)  kubelet  Back-off restarting failed container
+health.issues[0]: code=NodeCreationFailure
+  message="Instances failed to join the kubernetes cluster"
+  resourceIds=[i-0a1b2c3d4e5f60001, i-0a1b2c3d4e5f60002, i-0a1b2c3d4e5f60003]
 ```
 
-### Container Status
+### Lifecycle timeline (ASG scaling activities)
 
-- State: Waiting (CrashLoopBackOff)
-- Last State: Terminated, Exit Code: 1, Reason: Error
-- Restart Count: 47
+| Time (UTC) | Event |
+|------------|-------|
+| 09:02 | 3 instances launched (launch succeeded) |
+| 09:17 | ASG health check failed, 3 instances terminated |
+| 09:18 | 3 replacement instances launched |
+| 09:33 | Terminated again |
 
-### Logs (--previous, last crash)
+Repeated launch and terminate pairs about 15 minutes apart. The instances launch fine but never join, so the ASG keeps replacing them.
 
-```
-2026-07-31T04:12:33Z INFO  Starting checkout-api v3.2.0
-2026-07-31T04:12:33Z INFO  Connecting to database...
-2026-07-31T04:12:34Z ERROR Failed to connect to database: connection refused to checkout-db.checkout.svc.cluster.local:5432
-2026-07-31T04:12:34Z FATAL Cannot start without database connection. Exiting.
-```
+### What ruled out what
 
-### Deployment History
+- **Capacity/quota:** ruled out. Launches succeed, no `InsufficientInstanceCapacity` or vCPU errors.
+- **Subnets:** ruled out. 212 to 240 free IPs across the three subnets.
+- **Network:** cluster endpoint is public and private; nodes have a NAT route. No evidence of a network problem.
+- **IAM:** `list-access-entries` shows no entry for `arn:aws:iam::111122223333:role/workers-v2-node-role`. The cluster's `authenticationMode` is `API`, so `aws-auth` mappings are ignored.
 
-```
-REVISION  CHANGE-CAUSE
-3         image updated to checkout-api:v3.1.0 (3 days ago)
-4         image updated to checkout-api:v3.2.0 (8 hours ago)  ← current
-```
+### Root cause (high confidence)
 
-### Service Check
+The node role has no access entry, and the cluster is in `API` authentication mode. The kubelet authenticates with the node role, is rejected, and never registers. CloudTrail shows the node role was created at 08:55 and no `CreateAccessEntry` for it exists.
 
-```bash
-$ kubectl get endpoints checkout-db -n checkout
-NAME          ENDPOINTS   AGE
-checkout-db   <none>      3d
-```
+The other nodegroup `workers-v1` works because its role has an `EC2_LINUX` entry created 3 months ago.
 
-The `checkout-db` service has **no endpoints** — no pods are backing it.
+### Recommended fix
 
-```bash
-$ kubectl get pods -n checkout -l app=checkout-db
-No resources found in checkout namespace.
-```
-
-The database pods are gone.
-
-### Findings
-
-1. All new checkout-api pods (v3.2.0) crash with exit code 1 because they can't connect to the database at `checkout-db.checkout.svc.cluster.local:5432`.
-2. The `checkout-db` service exists but has zero endpoints — no database pods are running to back it.
-3. One old pod (from revision 3, v3.1.0) is still running because the deployment hasn't fully rolled over (the new pods keep crashing, so the old RS keeps one replica alive).
-4. This is NOT caused by the v3.2.0 deployment itself — the new version is fine, it just can't reach a database that doesn't exist.
-
-### Assessment
-
-**Root cause: The checkout-db pods were deleted or scaled to zero.** The checkout-api deployment is healthy — it crashes because its dependency (the database) is missing, not because of a code bug.
-
-### Recommendation
-
-1. Investigate why checkout-db pods are gone: `kubectl get events -n checkout --field-selector involvedObject.name=checkout-db`
-2. Check if checkout-db is a StatefulSet that was accidentally scaled down or deleted
-3. Once the database is restored, the checkout-api pods will recover automatically (Kubernetes will keep restarting them and they'll eventually connect)
+Create an access entry of type `EC2_LINUX` for `workers-v2-node-role` (or recreate the nodegroup through EKS, which creates it automatically). Then update the nodegroup to retry.
 
 ### What I couldn't verify
 
-- Whether the database was intentionally removed (would need CloudTrail or git history of whoever applied the change)
-- Whether there's data loss from the database being gone (depends on PVC state)
+- Control plane `authenticator` logs would show the exact rejected ARN, but `logging.clusterLogging` shows no log types enabled, so there is no history to search. Consider enabling `authenticator` and `api` for future incidents.
+- Kubelet logs on the instances (no cluster or SSH access from this layer). If the fix doesn't resolve it, run `get-console-output` via the ec2 skill, or check `journalctl -u kubelet` on a node.
