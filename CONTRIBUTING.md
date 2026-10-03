@@ -27,7 +27,7 @@ aws sts get-caller-identity --profile <your-read-only-profile>
 Run the plugin from your working copy, from any directory:
 
 ```
-claude --plugin-dir /path/to/codeblue-ai --agent codeblue-ai:codeblue
+claude --plugin-dir /path/to/codeblue-ai --agent codeblue-ai
 ```
 
 Set your profile and region in the plugin options (`claude plugin configure codeblue-ai`).
@@ -36,7 +36,7 @@ Set your profile and region in the plugin options (`claude plugin configure code
 
 | Path | What it is | Change it when |
 |------|------------|----------------|
-| `agents/codeblue.md` | The agent: persona, read-only rules, reporting format, escalation guidance | Behavior that applies to every investigation changes |
+| `agents/codeblue-ai.md` | The agent: persona, read-only rules, reporting format, escalation guidance | Behavior that applies to every investigation changes |
 | `skills/eks/SKILL.md` | Primary skill for EKS investigation | EKS investigation logic changes |
 | `skills/ec2/SKILL.md` | Instance-level investigation | Instance checks change |
 | `skills/cloudwatch/SKILL.md` | Metrics, alarms and log queries | Metric or log handling changes |
@@ -45,7 +45,7 @@ Set your profile and region in the plugin options (`claude plugin configure code
 | `.claude-plugin/plugin.json` | Plugin manifest and install options | Version, metadata or options change |
 | `.claude-plugin/marketplace.json` | Lets the repo be added as a marketplace | Version changes |
 
-A root `CLAUDE.md` is not loaded from plugins, so do not put agent behavior there. Put it in `agents/codeblue.md` or a skill.
+A root `CLAUDE.md` is not loaded from plugins, so do not put agent behavior there. Put it in `agents/codeblue-ai.md` or a skill.
 
 ## 3. Make a change
 
@@ -74,7 +74,7 @@ Skills install together and hand over to each other by name (for example, `eks` 
 
 ### Change the agent
 
-1. Edit `agents/codeblue.md`.
+1. Edit `agents/codeblue-ai.md`.
 2. Keep the read-only rule and the "establish context first" rule.
 3. Do not add tools that can write.
 
