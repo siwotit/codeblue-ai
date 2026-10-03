@@ -97,7 +97,7 @@ Problem received → What type?
 │  → Check if the port is listening (security group allows traffic but nothing is bound to the port)
 │  → Check memory (CWAgent namespace) — OOM may have killed the process without failing the instance
 │  → If load balancer is involved: check target group health and health check path
-│  → This may cross into the ECS or EKS skill if the app runs in containers
+│  → This may cross into the EKS skill if the app runs in containers
 │
 ├─ "Is it in an ASG?" / scaling questions
 │  → Check instance tags for aws:autoscaling:groupName
@@ -147,7 +147,7 @@ Common networking problems beyond security groups:
 
 EC2 does NOT publish memory metrics by default. `MemoryUtilization` only appears if:
 - CloudWatch Agent is installed and configured (namespace: `CWAgent`)
-- Container Insights is enabled (for ECS/EKS on EC2)
+- Container Insights is enabled (for EKS on EC2)
 
 If memory metrics are not available, say so. Don't search for them in `AWS/EC2` — they won't be there. Check `CWAgent` namespace with dimension `InstanceId` instead.
 
