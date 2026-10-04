@@ -1,6 +1,6 @@
 {
   "name": "codeblue-ai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Helps you investigate Amazon EKS issues from the AWS side. It finds what's wrong, shows the evidence, and tells you what to do next. Read-only, and it works with AWS APIs alone, so no kubectl is needed.",
   "author": {
     "name": "David Wainaina"
