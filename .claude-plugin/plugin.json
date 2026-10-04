@@ -22,13 +22,7 @@
     "aws_mcp_region": {
       "type": "string",
       "title": "AWS MCP Server region",
-      "description": "Region of the AWS MCP Server endpoint. Must be a supported endpoint region (see the README). Independent of where your resources are.",
-      "default": "eu-central-1"
-    },
-    "aws_region": {
-      "type": "string",
-      "title": "Default region for your resources",
-      "description": "Default region for AWS API calls and CloudWatch queries, where your EKS clusters run. The agent uses another region when you name one.",
+      "description": "Region of the AWS MCP Server endpoint. Must be a supported endpoint region (see the README).",
       "default": "eu-central-1"
     }
   }

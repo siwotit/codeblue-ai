@@ -6,18 +6,16 @@
         "mcp-proxy-for-aws-cli@latest",
         "https://aws-mcp.${user_config.aws_mcp_region}.api.aws/mcp",
         "--profile",
-        "${user_config.aws_profile}",
-        "--region",
-        "${user_config.aws_region}",
-        "--read-only"
+        "${user_config.aws_profile}"
       ]
     },
     "awslabs.cloudwatch-mcp-server": {
       "command": "uvx",
-      "args": ["awslabs.cloudwatch-mcp-server@latest"],
+      "args": [
+        "awslabs.cloudwatch-mcp-server@latest"
+      ],
       "env": {
         "AWS_PROFILE": "${user_config.aws_profile}",
-        "AWS_REGION": "${user_config.aws_region}",
         "FASTMCP_LOG_LEVEL": "ERROR"
       }
     }
