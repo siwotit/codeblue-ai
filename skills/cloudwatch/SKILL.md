@@ -25,9 +25,9 @@ Problem received → What type?
 │
 ├─ Alarm firing or alarm questions
 │  → Get alarm details and history (get_active_alarms, get_alarm_history)
-│  → Check alarm configuration (threshold, dimensions, evaluation periods)
-│  → Pull the underlying metric and compare to baseline
-│  → Assess: real anomaly, normal variance, or alarm misconfiguration?
+│  → Identify the metric breached and the resource from its dimensions
+│  → Pull that metric for the breach window and compare to baseline
+│  → Report what the alarm says about the resource; hand over to the ec2 or eks skill for resource-level checks
 │
 ├─ "Check the logs" / "Are there errors?"
 │  → Identify log group(s) (describe_log_groups if needed)
@@ -35,94 +35,70 @@ Problem received → What type?
 │  → If specific query needed: execute_log_insights_query → get_logs_insight_query_results
 │  → For multi-region or multi-group: execute_cwl_insights_batch
 │
-├─ "What's the trend?" / Capacity planning
-│  → Pull extended baseline (7d or 14d)
-│  → Use analyze_metric for trend and seasonality
-│  → Identify growth patterns, cyclical behavior, or drift
-│
-└─ "Is this alarm configured correctly?"
-   → Get alarm details
-   → Check dimensions, threshold vs actual values, evaluation periods, actions
-   → Compare threshold against get_recommended_metric_alarms
-   → Recommend fixes
+└─ "What's the trend?" / Capacity planning
+   → Pull extended baseline (7d or 14d)
+   → Use analyze_metric for trend and seasonality
+   → Identify growth patterns, cyclical behavior, or drift
 ```
 
 ## Investigation Patterns
 
-### Pattern: Alarm Assessment
+### Pattern: Alarm Investigation
 
-When an alarm fires, answer these questions in order:
+Treat the alarm as a signal: something crossed a threshold. Find out what it says about the resource.
 
-1. **What triggered it?** Get the alarm history. Find the triggering datapoint and time.
-2. **Is the metric actually anomalous?** Pull 1h current and 24h baseline. Compare means, p95, max. If current is within 1 standard deviation of baseline, it's likely noise.
-3. **Is the alarm well-configured?** Check:
-   - Does it have specific dimensions (InstanceId, ServiceName) or is it an undimensioned aggregate?
-   - Is the threshold realistic vs the metric's normal range?
-   - Does it require sustained breach (multiple evaluation periods) or fires on a single datapoint?
-   - Has it been in ALARM continuously since creation (never recovered)?
-4. **What's the conclusion?** One of:
-   - Real anomaly: metric genuinely deviated. Describe the deviation and timeframe.
-   - Normal variance: metric fluctuates into this range regularly. Show the baseline.
-   - Alarm misconfiguration: threshold too low, missing dimensions, or insufficient evaluation. Explain what's wrong.
-   - Insufficient data: can't determine. Say what's missing.
-
-### Pattern: Baseline Comparison
-
-Standard baseline comparison for any metric:
-
-1. Pull **current window** (last 1h, 1-min period, Average stat)
-2. Pull **baseline window** (last 24h, 5-min period, Average stat)
-3. Compute:
-   - Current mean vs baseline mean
-   - Current max vs baseline p95
-   - Percent change from baseline
-4. Classify:
-   - < 2x baseline stddev → normal variance
-   - 2-3x baseline stddev → elevated (worth noting)
-   - > 3x baseline stddev → anomalous (investigate further)
-   - > 5x baseline stddev → critical deviation
+1. **What did it breach?** Get the alarm and its history. Note the metric and namespace, the threshold and comparison, the statistic and period, and when it went into ALARM (and whether it still is).
+2. **Which resource?** Read the dimensions (InstanceId, AutoScalingGroupName, ClusterName, VolumeId and so on) and identify the resource and its type.
+3. **What does the metric say about that resource?** Pull the metric for the window around the breach and a 24h baseline. Report the breach size (value vs threshold vs baseline), when it started, how long it lasted, and whether it is still going.
+4. **What else moved at the same time?** Pull related metrics on the same resource (for an instance: CPU, EBS throttling, network) and logs around the breach time.
+5. **Hand over when the resource needs its own checks.**
+   - Instance-level cause (status checks, CPU, EBS, network, console output): hand over to the `ec2` skill with the instance ID, the time window, and the breach.
+   - Node, nodegroup or cluster context: hand over to the `eks` skill.
+6. **State what the alarm says.** The resource, the metric, the size and timing of the breach, the likely cause if the evidence supports one, and what is still unknown. If the breach is small and brief, say so and show the baseline, but do not stop at "noise" without saying what the resource was doing.
 
 ### Pattern: Log Error Investigation
 
-1. Start with `analyze_log_group` — it finds anomalies and patterns automatically
+**Make log searches case-insensitive.** Logs Insights is case-sensitive by default. Put `(?i)` at the start of every regex, for example `/(?i)error/`, so `error`, `Error` and `ERROR` all match.
+
+1. Start with `analyze_log_group` to find anomalies and patterns automatically
 2. If you need specific queries, use `execute_log_insights_query` with:
    ```
    fields @timestamp, @message
-   | filter @message like /ERROR|Exception|Timeout/
+   | filter @message like /(?i)error|exception|timeout/
    | sort @timestamp desc
    | limit 50
    ```
 3. For counting errors over time:
    ```
-   filter @message like /ERROR/
+   filter @message like /(?i)error/
    | stats count(*) as errorCount by bin(5m)
    | sort bin(5m) desc
    ```
-4. Always check: are these errors new (not in baseline) or pre-existing?
 
 ## Tool Reference
 
-These are the CloudWatch MCP tools available. Run `--help` mentally before using each one:
+These are the CloudWatch MCP tools available:
 
 | Tool | Use for |
 |------|---------|
 | `get_active_alarms` | Find currently firing alarms |
 | `get_alarm_history` | See when an alarm fired, what triggered it, state transitions |
-| `get_metric_data` | Pull metric values for a time range (the core investigation tool) |
+| `get_metric_data` | Pull metric values for a time range (the core investigation tool). Supports percentiles (p50, p90, p99), math expressions and batching several metrics in one call |
 | `get_metric_metadata` | Understand what a metric means, how it's calculated, what stats to use |
-| `get_recommended_metric_alarms` | Get suggestions for how an alarm should be configured |
 | `analyze_metric` | Determine trend, seasonality, and statistical properties |
 | `describe_log_groups` | Find log groups by name pattern |
 | `analyze_log_group` | Automatic anomaly and pattern detection in logs |
 | `execute_log_insights_query` | Run a specific Logs Insights query |
 | `get_logs_insight_query_results` | Get results from a query started with execute_log_insights_query |
-| `execute_cwl_insights_batch` | Query across multiple log groups/regions in one call |
+| `cancel_logs_insight_query` | Stop a Logs Insights query that is still running |
+| `execute_cwl_insights_batch` | Run one query across many log groups and regions in one call. It polls for completion and merges the results, so no separate results call is needed |
 
 ## What to Report
 
 Always include:
-- The specific numbers (current value, baseline value, percent deviation)
-- Timestamps (when did the anomaly start, when was the alarm triggered)
-- Your assessment (real problem vs noise vs misconfiguration)
-- What you checked and what you couldn't verify
-- Recommended action (fix the alarm, investigate the service, escalate, etc.)
+- The resource and the metric (and the alarm, if one fired)
+- The numbers: current value and baseline value, plus the threshold if an alarm fired
+- Timestamps: when the breach or anomaly started, how long it lasted, and when the alarm triggered
+- Your assessment: what the data says about the resource, and the likely cause if the evidence supports one
+- What you couldn't verify, and how to check it
+- Recommended action (investigate the resource, hand over to the ec2 or eks skill, escalate, etc.)
