@@ -49,13 +49,29 @@ Problem received → What type?
 │  → For T-series: check CPUCreditBalance (zero credits = throttled to baseline)
 │
 ├─ "What changed?" / instance behaving differently
-│  → Check CloudTrail for recent events on this instance:
-│    - ModifyInstanceAttribute (type change, SG change)
+│  → Ask when it started behaving differently, then look for a change just before that time.
+│  → Changes are logged against different resources, so search each one, not only the instance ID.
+│    Get them first: describe-instances → security groups, volumes, network interfaces, IAM instance profile → role.
+│  → The instance (search by instance ID):
+│    - ModifyInstanceAttribute (type change, SG change, source/dest check)
 │    - StopInstances / StartInstances / RebootInstances
+│    - ModifyInstanceMetadataOptions (IMDS hop limit or IMDSv2 setting; containers can lose credentials)
+│    - ReplaceIamInstanceProfileAssociation / DisassociateIamInstanceProfile (profile swapped or removed)
+│  → Its volumes (search by volume ID):
 │    - AttachVolume / DetachVolume
-│    - AuthorizeSecurityGroupIngress/Egress
+│    - ModifyVolume (type, IOPS or throughput changed, which changes the throttle limits)
+│  → Its security groups (search by SG ID; events are logged on the group, not the instance):
+│    - RevokeSecurityGroupIngress/Egress (removing a rule is what breaks connectivity)
+│    - AuthorizeSecurityGroupIngress/Egress (added rules rarely break anything, but can widen access)
+│  → Its IAM role. People change a role's permissions without changing the role attached to the instance, so the
+│    instance profile looks untouched. Search by role name and by each attached policy ARN:
+│    - AttachRolePolicy / DetachRolePolicy
+│    - PutRolePolicy / DeleteRolePolicy (inline policies)
+│    - CreatePolicyVersion / SetDefaultPolicyVersion / DeletePolicyVersion (edits a customer-managed policy and
+│      changes every role that uses it)
+│    - UpdateAssumeRolePolicy (trust policy)
+│    IAM is a global service: its events appear in the us-east-1 CloudTrail event history. Query us-east-1.
 │  → Compare metrics before and after the change time
-│  → Identify what action caused the behavior shift
 │
 ├─ "Instance won't boot" / stuck starting / can't SSH or SSM
 │  → Check instance state (is it running, pending, or stopped?)
@@ -90,8 +106,13 @@ Problem received → What type?
 │  → Check ASG scaling activity if applicable
 │
 ├─ "Instance is running but application/service is down"
-│  → Status checks pass, metrics look normal, but the app doesn't respond
-│  → This is application-level, not infrastructure-level
+│  → Status checks pass but the app doesn't respond
+│  → First rule out CPU: pull CPUUtilization for the window the app was down, against the 24h baseline
+│    - Sustained high (near 100%, or far above baseline), or CPUCreditBalance at 0 on a t-series:
+│      the instance is starved, not the app. Go to the "High CPU" branch (it checks EBS throttling,
+│      which shows up as high CPU from I/O wait)
+│    - CPU normal: continue below
+│  → With CPU normal, this is application-level, not infrastructure-level
 │  → Check CloudWatch Logs for the application (error patterns, crashes, restarts)
 │  → Check if the process is running (SSM if available)
 │  → Check if the port is listening (security group allows traffic but nothing is bound to the port)
@@ -137,11 +158,10 @@ When connectivity fails:
 ### ENI and IP Issues
 
 Common networking problems beyond security groups:
-- **Detached ENI**: Primary ENI detached or secondary ENI removed — instance loses connectivity
+- **Detached ENI**: Primary ENI detached or secondary ENI removed - instance loses connectivity
 - **No available IPs in subnet**: New instances or ENI attachments fail with "InsufficientFreeAddressesInSubnet"
-- **Multiple ENIs**: Instance with multiple ENIs may have asymmetric routing — check route tables per ENI
-- **Elastic IP disassociated**: Public connectivity lost — check ec2:DescribeAddresses
-- **Source/dest check**: Must be disabled for NAT instances or transit — check ec2:DescribeInstanceAttribute
+- **Multiple ENIs**: Instance with multiple ENIs may have asymmetric routing - check route tables per ENI
+- **Elastic IP disassociated**: Public connectivity lost - check ec2:DescribeAddresses
 
 ### Memory Metrics
 
@@ -149,7 +169,7 @@ EC2 does NOT publish memory metrics by default. `MemoryUtilization` only appears
 - CloudWatch Agent is installed and configured (namespace: `CWAgent`)
 - Container Insights is enabled (for EKS on EC2)
 
-If memory metrics are not available, say so. Don't search for them in `AWS/EC2` — they won't be there. Check `CWAgent` namespace with dimension `InstanceId` instead.
+If memory metrics are not available, say so. Don't search for them in `AWS/EC2`. Check `CWAgent` namespace with dimension `InstanceId` instead.
 
 ### Metrics to Pull for Any EC2 Problem
 
@@ -162,6 +182,14 @@ If memory metrics are not available, say so. Don't search for them in `AWS/EC2` 
 | StatusCheckFailed_Instance | AWS/EC2 | Guest OS health |
 | EBSReadOps / EBSWriteOps | AWS/EC2 | Storage IOPS |
 | EBSReadBytes / EBSWriteBytes | AWS/EC2 | Storage throughput |
+| VolumeIOPSExceededCheck | AWS/EBS (per VolumeId) | 1 = the volume hit its provisioned IOPS limit and is throttled. Nitro instances only; not for magnetic or Multi-Attach volumes |
+| VolumeThroughputExceededCheck | AWS/EBS (per VolumeId) | 1 = the volume hit its provisioned throughput limit and is throttled. Same Nitro-only limits |
+| InstanceEBSIOPSExceededCheck | AWS/EC2 (per InstanceId) | 1 = the instance hit its total EBS IOPS limit, across all its volumes. Nitro, non-bare-metal only |
+| InstanceEBSThroughputExceededCheck | AWS/EC2 (per InstanceId) | 1 = the instance hit its total EBS throughput limit, across all its volumes. Nitro, non-bare-metal only |
+| BurstBalance | AWS/EBS (per VolumeId) | Percent of burst credits left (I/O credits on gp2, throughput credits on st1 and sc1); 0 means throttled to baseline. Not reported for gp3 |
+| VolumeQueueLength | AWS/EBS (per VolumeId) | Requests waiting on the volume; persistently high means I/O is backing up |
+| VolumeStalledIOCheck | AWS/EBS (per VolumeId) | 1 = the volume failed a stalled-I/O check in the last minute. Nitro instances only |
+| EBSIOBalance% / EBSByteBalance% | AWS/EC2 (per InstanceId) | Percent of instance-level EBS IOPS / throughput burst credits left. Only on some *.4xlarge sizes and smaller, which burst to full EBS performance for about 30 minutes per 24 hours. Basic monitoring only |
 | CPUCreditBalance | AWS/EC2 | Burstable instance credits (T-series) |
 
 ### Console Output (ec2:GetConsoleOutput)
@@ -182,6 +210,9 @@ Shows the last ~64KB of serial console output. Critical for diagnosing boot fail
 | `VFS: Unable to mount root fs` | Wrong root device or corrupted AMI |
 | `Dependency failed` | /etc/fstab has bad entries — volume missing or syntax error. Instance enters emergency mode |
 | `Welcome to emergency mode` | fstab mount failure or kernel issue forced emergency mode. Fix fstab (add `nofail` to secondary mounts) or revert kernel |
+| `i/o timeout`, `Connection timed out`, `curl: (28)` | The instance could not reach something it needs (the EKS API server, ECR, S3, IMDS, a package repo). Check the route table or NAT, security groups and NACLs, VPC endpoints, and the cluster endpoint access settings |
+| `Timed out waiting for device`, `A start job is running for ...` | systemd is waiting on a device or service that never came up, often an fstab volume that is detached or missing. Related to the `Dependency failed` row |
+| `cloud-init` timeouts (`Timeout`, `Failed to fetch`) | User data or a datasource call could not complete, usually a network path problem during boot |
 | `You are in emergency mode` | Same as above. Check fstab entries for missing volumes or typos |
 
 ### Network Bandwidth and PPS Limits (Microbursts)
@@ -275,8 +306,8 @@ When you see `VolumeIOPSExceededCheck` or `VolumeThroughputExceededCheck`, the f
 **gp2 burst credit pattern:**
 - Small gp2 volumes (< 1TB) rely on burst credits for IOPS above baseline
 - Once credits hit zero, IOPS drops to baseline (3 × volume size in GB)
-- A 100GB gp2 volume has baseline of only 300 IOPS — easily exhausted
-- Check `BurstBalance` metric (AWS/EBS) — if it's at 0%, volume is throttled
+- A 100GB gp2 volume has baseline of only 300 IOPS; easily exhausted
+- Check `BurstBalance` metric (AWS/EBS); if it's at 0%, volume is throttled
 
 **Key insight:** If `VolumeIOPSExceededCheck` is firing on a gp2 volume, the cheapest fix is often just migrating to gp3 (free 3000 IOPS baseline regardless of size).
 
@@ -286,4 +317,4 @@ This skill references AWS API calls (ec2:Describe*, ec2:GetConsoleOutput, CloudT
 
 - You can still investigate using CloudWatch metrics (CPUUtilization, StatusCheckFailed, NetworkIn/Out, EBS metrics)
 - Say explicitly what you would check if the API were available
-- Don't guess at resource state — state what you know from metrics and what remains unknown
+- Don't guess at resource state; state what you know from metrics and what remains unknown
