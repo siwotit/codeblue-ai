@@ -251,7 +251,7 @@ For a complete example of a well-structured investigation output, see [examples/
 
 ## Tool Usage
 
-- **aws-mcp** (AWS MCP Server, `run_script`, read-only): primary — EKS (DescribeCluster/Nodegroup/Addon, ListUpdates, ListAccessEntries, ListPodIdentityAssociations), IAM get/list, Auto Scaling (DescribeScalingActivities, DescribeInstanceRefreshes), CloudTrail LookupEvents, Service Quotas, and the EC2 describe calls needed for join diagnosis (instance state, subnets, launch templates, console output)
+- **aws-mcp** (AWS MCP Server): primary. Call AWS APIs through `run_script` with `call_boto3(service, operation, region_name=...)`; `import boto3` is not allowed in the sandbox. — EKS (DescribeCluster/Nodegroup/Addon, ListUpdates, ListAccessEntries, ListPodIdentityAssociations), IAM get/list, Auto Scaling (DescribeScalingActivities, DescribeInstanceRefreshes), CloudTrail LookupEvents, Service Quotas, and the EC2 describe calls needed for join diagnosis (instance state, subnets, launch templates, console output)
 - **ec2 skill**: hand over for any instance deep-dive (status checks, performance, EBS/credit throttling, boot issues)
 - **cloudwatch skill**: hand over for metric numbers, baselines, alarms, and log queries (including control plane logs, only when logging is enabled on the cluster)
 - **kubectl**: NOT used by this skill — when cluster-side evidence is needed, give the engineer the commands to run

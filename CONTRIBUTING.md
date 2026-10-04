@@ -30,7 +30,7 @@ Run the plugin from your working copy, from any directory:
 claude --plugin-dir /path/to/codeblue-ai --agent codeblue-ai
 ```
 
-Set your profile and region in the plugin options (`claude plugin configure codeblue-ai`).
+Set your profile and the AWS MCP Server region in the plugin options (`claude plugin configure codeblue-ai@codeblue-ai`).
 
 ## 2. Know where things live
 

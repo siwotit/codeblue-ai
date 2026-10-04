@@ -12,7 +12,7 @@ A read-only diagnostic agent for Amazon EKS, packaged as a Claude Code plugin. A
 | Skill `eks` | EKS investigation: nodes, control plane, access, addons, EBS volumes |
 | Skill `ec2` | Instance health: status checks, console output, EBS and CPU throttling |
 | Skill `cloudwatch` | Metrics, baselines, alarms and logs |
-| MCP `aws-mcp` | AWS MCP Server through the SigV4 proxy, started with `--read-only` |
+| MCP `aws-mcp` | AWS MCP Server through the SigV4 proxy. Access is limited by your read-only AWS profile |
 | MCP `awslabs.cloudwatch-mcp-server` | Metric and log analysis |
 
 The skills install together and call on each other during an investigation. `eks` is the usual starting point.
@@ -33,22 +33,21 @@ claude plugin install codeblue-ai@codeblue-ai
 
 The first command adds this repo as a marketplace (a catalog of plugins). The second installs the plugin from it. You do this once per machine. Inside a Claude Code session, the same commands work as `/plugin marketplace add ...` and `/plugin install ...`.
 
-Claude Code asks for three options at install time (change later with `claude plugin configure codeblue-ai`):
+Claude Code asks for two options at install time (change later with `claude plugin configure codeblue-ai@codeblue-ai`):
 
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `aws_profile` | `codeblue-aiagent` | AWS CLI profile to use. Must be read-only |
 | `aws_mcp_region` | `eu-central-1` | Region of the AWS MCP Server endpoint. Must be a [supported endpoint region](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html#step-2-choose-auth-method) |
-| `aws_region` | `eu-central-1` | Default region for your resources (where your clusters run) |
 
-The two regions are unrelated. `aws_mcp_region` is where the AWS MCP Server you connect to runs. `aws_region` is where your clusters are, and it is only a default: name another region in your question, such as "check us-west-2", and the agent uses that instead.
+The agent does not have a default region. Name the region in your question, or it will ask which one to use.
 
 ### Scripted setup
 
 Skip the prompts by passing the options on install with `--config` (repeat for each option):
 
 ```
-claude plugin install codeblue-ai@codeblue-ai --config aws_profile=my-readonly --config aws_region=us-west-2
+claude plugin install codeblue-ai@codeblue-ai --config aws_profile=my-readonly --config aws_mcp_region=eu-central-1
 ```
 
 ## Use
@@ -57,6 +56,12 @@ Start the agent:
 
 ```
 claude --agent codeblue-ai
+```
+
+The AWS profile and the AWS MCP Server region are plugin options. To change them, run this inside Claude Code and restart:
+
+```
+/plugin configure codeblue-ai@codeblue-ai
 ```
 
 Then describe the problem, for example:
