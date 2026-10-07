@@ -19,10 +19,27 @@ The skills install together and call on each other during an investigation. `eks
 
 ## Prerequisites
 
-1. [`uv`](https://docs.astral.sh/uv/) installed (the MCP servers start with `uvx`).
-2. AWS CLI v2.32+ signed in (`aws login` or `aws configure sso`).
-3. **A read-only AWS profile.** The agent is read-only by design, but the profile is the real safety net. Attach a read-only policy such as `ReadOnlyAccess`, plus the permissions the AWS MCP Server itself requires (see [AWS MCP Server managed policies](https://docs.aws.amazon.com/aws-mcp/latest/userguide/security-iam-awsmanpol.html)). Do not point it at an admin profile.
-4. Check it works: `aws sts get-caller-identity --profile <your-profile>`.
+1. **Claude Code** installed — it runs the plugin and provides the `claude` command.
+
+   ```
+   curl -fsSL https://claude.ai/install.sh | bash
+   ```
+
+   (Or see the [Claude Code setup guide](https://docs.claude.com/en/docs/claude-code/setup) for other install methods.) Check it works: `claude --version`.
+
+2. **[`uv`](https://docs.astral.sh/uv/)** installed — the MCP servers start with `uvx`.
+
+   ```
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+   Check it works: `uvx --version`.
+
+3. **AWS CLI** signed in (`aws login` or `aws configure sso`).
+
+4. **A read-only AWS profile.** The agent is read-only by design, but the profile is the real safety net. Attach a read-only policy such as `ReadOnlyAccess`, plus the permissions the AWS MCP Server itself requires (see [AWS MCP Server managed policies](https://docs.aws.amazon.com/aws-mcp/latest/userguide/security-iam-awsmanpol.html)). Do not point it at an admin profile.
+
+5. Check it works: `aws sts get-caller-identity --profile <your-profile>`.
 
 ## Install
 
